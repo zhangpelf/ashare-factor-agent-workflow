@@ -1,0 +1,10 @@
+{
+  "n_factors": 8,
+  "valid_ic": 6,
+  "valid_sharpe": 4,
+  "valid_fm": 0,
+  "valid_overall": 3,
+  "best_factor": "beta_z",
+  "best_sharpe": 1.9144,
+  "quality": "高"
+}

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>因子挖掘研究报告</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Times New Roman', 'Songti SC', 'STSong', serif;
+    line-height: 1.8; color: #1a1a1a; background: #fff;
+    max-width: 960px; margin: 0 auto; padding: 0 2em 4em;
+}
+/* ── Header ── */
+.report-header {
+    background: linear-gradient(135deg, #1a365d 0%, #2a4a7f 100%);
+    color: #fff; padding: 2.5em 2em; margin: 0 -2em 2em;
+    border-radius: 0 0 12px 12px;
+}
+.report-header h1 { font-size: 1.8em; font-weight: 700; margin-bottom: 0.3em; border: none; color: #fff; }
+.report-header .meta { color: #b0c4e8; font-size: 0.9em; line-height: 1.6; }
+.report-header .meta span { display: inline-block; margin-right: 1.5em; }
+.meta-badge {
+    display: inline-block; padding: 0.15em 0.8em; border-radius: 10px;
+    font-size: 0.85em; font-weight: 600;
+}
+.badge-high { background: #38a169; color: #fff; }
+.badge-mid { background: #d69e2e; color: #fff; }
+.badge-low { background: #e53e3e; color: #fff; }
+
+/* ── Headings ── */
+h2 {
+    color: #1a365d; font-size: 1.35em; margin: 1.8em 0 0.8em;
+    padding-bottom: 0.25em; border-bottom: 2px solid #e2e8f0;
+}
+h2::before { content: ""; display: inline-block; width: 4px; height: 1em;
+    background: #2a4a7f; margin-right: 0.5em; vertical-align: middle; }
+h3 { color: #2d3748; font-size: 1.1em; margin: 1.2em 0 0.6em; }
+
+/* ── Tables ── */
+.table-wrap { overflow-x: auto; margin: 1em 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88em; }
+th, td { border: 1px solid #e2e8f0; padding: 0.5em 0.8em; text-align: center; }
+th { background: #f7fafc; color: #1a365d; font-weight: 600; }
+tr:nth-child(even) { background: #fafbfc; }
+tr:hover { background: #edf2f7; }
+
+/* ── Figures ── */
+.figure-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1em; margin: 1em 0;
+}
+.figure-grid object, .figure-grid img {
+    width: 100%; height: auto; border: 1px solid #e2e8f0;
+    border-radius: 6px; background: #fafbfc; min-height: 200px;
+}
+.figure-wide {
+    margin: 1.2em 0; text-align: center;
+}
+.figure-wide object, .figure-wide img {
+    max-width: 100%; max-height: 600px;
+    border: 1px solid #e2e8f0; border-radius: 8px;
+}
+.figure-caption { font-size: 0.82em; color: #718096; margin-top: 0.3em; text-align: center; }
+
+/* ── Lists ── */
+ul { margin: 0.5em 0 0.5em 1.5em; }
+li { margin-bottom: 0.3em; }
+strong { color: #1a365d; }
+
+/* ── Blockquote (meta) ── */
+blockquote {
+    border-left: 3px solid #2a4a7f; margin: 1em 0; padding: 0.5em 1em;
+    background: #f7fafc; color: #4a5568;
+}
+
+/* ── KPI Cards ── */
+.kpi-row { display: flex; gap: 1em; margin: 1.2em 0; flex-wrap: wrap; }
+.kpi-card {
+    flex: 1; min-width: 140px; padding: 1em; border-radius: 8px;
+    background: #f7fafc; border: 1px solid #e2e8f0; text-align: center;
+}
+.kpi-card .kpi-value { font-size: 1.6em; font-weight: 700; color: #2a4a7f; }
+.kpi-card .kpi-label { font-size: 0.8em; color: #718096; margin-top: 0.2em; }
+.kpi-card.up { border-top: 3px solid #38a169; }
+.kpi-card.down { border-top: 3px solid #e53e3e; }
+
+/* ── Recommendation ── */
+.rec-box {
+    padding: 1em; border-radius: 8px; margin: 0.5em 0;
+    border-left: 4px solid;
+}
+.rec-buy { background: #f0fff4; border-color: #38a169; }
+.rec-sell { background: #fff5f5; border-color: #e53e3e; }
+.rec-neutral { background: #fffbeb; border-color: #d69e2e; }
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+    body { padding: 0 1em 2em; }
+    .report-header { margin: 0 -1em 1.5em; padding: 1.5em 1em; }
+    .kpi-row { flex-direction: column; }
+    .figure-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Print ── */
+@media print {
+    body { max-width: none; padding: 0; font-size: 11pt; }
+    .report-header { background: #1a365d !important; -webkit-print-color-adjust: exact; }
+    th { background: #f7fafc !important; -webkit-print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<div class="report-header"><h1>因子挖掘研究报告</h1><div class="meta">
+<span>生成时间: <strong>2026-05-30 00:50</strong></span>
+<br>
+<br>
+<span>因子总数: <strong>8</strong></span>
+<span>有效因子: <strong>4</strong></span>
+<span>最佳: <strong>beta_z</strong></span>
+<br>
+<br><span class="meta-badge badge-high">因子池质量: 高</span></div></div>
+<h2>1. 执行摘要</h2>
+<p>本报告对 8 个因子进行了系统性挖掘和检验。</p>
+<p><strong>核心发现：</strong></p>
+<ul>
+<li>有效因子：4 个（IC 显著、多空收益稳健）</li>
+<li>最佳因子：beta_z（IC=0.0207, Sharpe=1.91）</li>
+<li>因子池整体质量：高</li>
+</ul>
+<h2>2. 数据与方法</h2>
+<h3>2.1 因子定义</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>因子名</th><th>Mean_IC</th><th>IR</th><th>Sharpe</th><th>FM t-stat</th></tr></thead><tbody>
+<tr><td>beta_z</td><td>0.0207</td><td>0.14</td><td>1.91</td><td>1.69</td></tr>
+<tr><td>momentum_6m_z</td><td>-0.0049</td><td>-0.02</td><td>-1.14</td><td>-0.87</td></tr>
+<tr><td>dollar_volume_z</td><td>-0.0075</td><td>-0.05</td><td>-0.34</td><td>-0.42</td></tr>
+<tr><td>st_reversal_1m_z</td><td>-0.0136</td><td>-0.05</td><td>0.04</td><td>-0.01</td></tr>
+<tr><td>amihud_illiq_z</td><td>-0.0203</td><td>-0.13</td><td>-0.22</td><td>-0.15</td></tr>
+<tr><td>size_z</td><td>-0.0207</td><td>-0.13</td><td>-0.78</td><td>-0.56</td></tr>
+<tr><td>max_ret_1m_z</td><td>-0.0396</td><td>-0.16</td><td>-0.04</td><td>-0.09</td></tr>
+<tr><td>ivol_capm_z</td><td>-0.0752</td><td>-0.21</td><td>-2.15</td><td>-1.60</td></tr>
+</tbody></table></div>
+<h2>3. 因子绩效</h2>
+<h3>3.1 IC/IR 总览</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>因子</th><th>Mean_IC</th><th>Std_IC</th><th>IR</th><th>Sharpe</th><th>FM_tstat</th></tr></thead><tbody>
+<tr><td>beta_z</td><td>0.0207</td><td>0.1486</td><td>0.14</td><td>1.91</td><td>1.69</td></tr>
+<tr><td>momentum_6m_z</td><td>-0.0049</td><td>0.1999</td><td>-0.02</td><td>-1.14</td><td>-0.87</td></tr>
+<tr><td>dollar_volume_z</td><td>-0.0075</td><td>0.1592</td><td>-0.05</td><td>-0.34</td><td>-0.42</td></tr>
+<tr><td>st_reversal_1m_z</td><td>-0.0136</td><td>0.2745</td><td>-0.05</td><td>0.04</td><td>-0.01</td></tr>
+<tr><td>amihud_illiq_z</td><td>-0.0203</td><td>0.1559</td><td>-0.13</td><td>-0.22</td><td>-0.15</td></tr>
+<tr><td>size_z</td><td>-0.0207</td><td>0.1566</td><td>-0.13</td><td>-0.78</td><td>-0.56</td></tr>
+<tr><td>max_ret_1m_z</td><td>-0.0396</td><td>0.2535</td><td>-0.16</td><td>-0.04</td><td>-0.09</td></tr>
+<tr><td>ivol_capm_z</td><td>-0.0752</td><td>0.3565</td><td>-0.21</td><td>-2.15</td><td>-1.60</td></tr>
+</tbody></table></div>
+<h2>4. 可视化分析</h2>
+<h3>4.1 IC 时间序列</h3>
+<div class="figure-grid">
+<object data="../figures/ic_series_momentum_6m_z.pdf" type="application/pdf" aria-label="ic_series_momentum_6m_z"><img src="../figures/ic_series_momentum_6m_z.pdf" alt="ic_series_momentum_6m_z"></object>
+<object data="../figures/ic_series_st_reversal_1m_z.pdf" type="application/pdf" aria-label="ic_series_st_reversal_1m_z"><img src="../figures/ic_series_st_reversal_1m_z.pdf" alt="ic_series_st_reversal_1m_z"></object>
+<object data="../figures/ic_series_max_ret_1m_z.pdf" type="application/pdf" aria-label="ic_series_max_ret_1m_z"><img src="../figures/ic_series_max_ret_1m_z.pdf" alt="ic_series_max_ret_1m_z"></object>
+<object data="../figures/ic_series_amihud_illiq_z.pdf" type="application/pdf" aria-label="ic_series_amihud_illiq_z"><img src="../figures/ic_series_amihud_illiq_z.pdf" alt="ic_series_amihud_illiq_z"></object>
+</div>
+<h3>4.2 累计收益</h3>
+<div class="figure-grid">
+<object data="../figures/cumulative_returns_beta_z.pdf" type="application/pdf" aria-label="cumulative_returns_beta_z"><img src="../figures/cumulative_returns_beta_z.pdf" alt="cumulative_returns_beta_z"></object>
+<object data="../figures/cumulative_returns_size_z.pdf" type="application/pdf" aria-label="cumulative_returns_size_z"><img src="../figures/cumulative_returns_size_z.pdf" alt="cumulative_returns_size_z"></object>
+<object data="../figures/cumulative_returns_momentum_6m_z.pdf" type="application/pdf" aria-label="cumulative_returns_momentum_6m_z"><img src="../figures/cumulative_returns_momentum_6m_z.pdf" alt="cumulative_returns_momentum_6m_z"></object>
+<object data="../figures/cumulative_returns_max_ret_1m_z.pdf" type="application/pdf" aria-label="cumulative_returns_max_ret_1m_z"><img src="../figures/cumulative_returns_max_ret_1m_z.pdf" alt="cumulative_returns_max_ret_1m_z"></object>
+</div>
+<h3>4.3 因子分布</h3>
+<div class="figure-grid">
+<object data="../figures/distribution_amihud_illiq_z.pdf" type="application/pdf" aria-label="distribution_amihud_illiq_z"><img src="../figures/distribution_amihud_illiq_z.pdf" alt="distribution_amihud_illiq_z"></object>
+<object data="../figures/distribution_momentum_6m_z.pdf" type="application/pdf" aria-label="distribution_momentum_6m_z"><img src="../figures/distribution_momentum_6m_z.pdf" alt="distribution_momentum_6m_z"></object>
+<object data="../figures/distribution_size_z.pdf" type="application/pdf" aria-label="distribution_size_z"><img src="../figures/distribution_size_z.pdf" alt="distribution_size_z"></object>
+<object data="../figures/distribution_beta_z.pdf" type="application/pdf" aria-label="distribution_beta_z"><img src="../figures/distribution_beta_z.pdf" alt="distribution_beta_z"></object>
+</div>
+<h2>6. 结论与建议</h2>
+<h3>6.1 推荐因子</h3>
+<ul>
+<li><strong>beta_z</strong> — IC=0.0207, Sharpe=1.91, 正向预测</li>
+<li><strong>momentum_6m_z</strong> — IC=-0.0049, Sharpe=-1.14, 负向预测</li>
+</ul>
+<h3>6.2 不推荐因子</h3>
+<ul>
+<li><strong>max_ret_1m_z</strong> — IC=-0.0396, Sharpe=-0.04, 不显著</li>
+</ul>
+</body></html>

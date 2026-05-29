@@ -1,0 +1,33 @@
+# Virtual environment
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large data files
+data/
+output/factor_data.parquet
+# Keep small output files for demo
+!output/ashare_factor_report.csv
+!output/factor_report.html
+!output/factor_report.md
+!output/factor_report_screenshot.png
+!output/analysis_summary.json
+!output/real_market_report.csv
+
+# Review stage
+review-stage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OMC state
+.omc/

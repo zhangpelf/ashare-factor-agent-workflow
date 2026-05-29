@@ -1,0 +1,1 @@
+/Users/zhangpeifu/Desktop/python/Auto-claude-code-research-in-sleep/tools/install_aris_codex.sh
