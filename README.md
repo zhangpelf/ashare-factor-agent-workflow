@@ -177,4 +177,12 @@ MIT
 
 ---
 
+## Acknowledgments
+
+- This project references skills and workflows from the **ARIS (Adversarial Research Improvement System)** methodology, particularly the `auto-review-loop` for cross-model adversarial review between Claude and GPT.
+- Factor testing methodology inspired by Cochrane's *Asset Pricing* (2005) and the growing "factor zoo" literature.
+- A-share market data sourced via yfinance with CSI 300 index constituents.
+
+---
+
 *Built with Claude Code AI-assisted development. Part of the ARIS (Adversarial Research Improvement System) methodology.*
