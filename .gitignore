@@ -16,7 +16,8 @@ output/factor_data.parquet
 !output/ashare_factor_report.csv
 !output/factor_report.html
 !output/factor_report.md
-!output/factor_report_screenshot.png
+!output/factor_report.png
+output/akshare_cache/
 !output/analysis_summary.json
 !output/real_market_report.csv
 
