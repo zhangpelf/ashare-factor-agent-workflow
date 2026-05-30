@@ -9,7 +9,7 @@ sys.path.insert(0, ".")
 from src.utils import generate_sample_data, compute_ic, compute_group_returns
 from src.factors import FACTOR_REGISTRY, compute_all_factors, calc_size, calc_bm
 from src.mine_factors import (
-    GroupLASSOSelector,
+    LassoSelector,
     RandomForestSelector,
     GeneticProgrammingMiner,
     FactorMiningPipeline,
@@ -71,7 +71,8 @@ class TestFactorComputation:
     def test_calc_all_factors(self, sample_data):
         result = compute_all_factors(sample_data)
         assert result is not None
-        assert "size" in result.columns or True  # may fail gracefully
+        assert "size" in result.columns, "size factor should be computed"
+        assert "momentum_6m" in result.columns, "momentum_6m factor should be computed"
 
     def test_compute_ic(self, sample_data):
         ic = compute_ic(sample_data["return"], sample_data["forward_1d_ret"])
@@ -101,7 +102,7 @@ class TestMiningMethods:
         cross = sample_data.drop_duplicates("stock_id").set_index("stock_id")
         X = cross[["market_cap", "book_equity", "total_assets"]].fillna(0)
         y = cross["return"].fillna(0)
-        lasso = GroupLASSOSelector(alpha_range=np.logspace(-2, 0, 10))
+        lasso = LassoSelector(alpha_range=np.logspace(-2, 0, 10))
         lasso.fit(X, y)
         assert hasattr(lasso, "selected_features")
 

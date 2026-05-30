@@ -72,9 +72,9 @@ python3 -m src.workflow_orchestrator --mode full --real-data
 等价于依次执行：
 1. `run_real_pipeline.py` → 因子计算 + 挖掘 + 检验
 2. `auto-因子评估` → 评估因子有效性
-3. `auto-因子图表` → 生成图表
+3. `auto-因子图表` → 生成图表（含 IC 衰减图）
 4. `auto-因子报告` → 生成结构化报告
-5. 渲染 HTML → `output/report.html`
+5. 渲染 HTML → `output/factor_report.html`
 
 ### `report` — 仅生成报告
 
@@ -172,25 +172,28 @@ summary.to_csv('output/factor_report.csv', index=False)
 ### G005: 可视化 + 检验报告
 
 ```bash
-# 1. 生成 IC 时序图、累计收益、相关性热力图、仪表盘
-python3 -c "
-from src.viz import save_all_factor_charts
-# ... 加载数据并调用
-"
+# 1. 批量生成 24+ 张图表（IC时序、累计收益、分布、热力图、IC衰减）
+python3 -m src.workflow_orchestrator --mode figures --input output/ashare_factor_report.csv
 
 # 2. 评估因子有效性
-auto-因子评估 "output/factor_report.csv"
+python3 -m src.workflow_orchestrator --mode analyze --input output/ashare_factor_report.csv
 
-# 3. 生成结构化报告
-auto-因子报告 "output/ashare_factor_report.csv"
+# 3. 生成结构化 Markdown 报告 + HTML 渲染
+python3 -m src.workflow_orchestrator --mode report --input output/ashare_factor_report.csv
 ```
 
 ### G006: 最终报告
 
 ```bash
-# 1. 渲染 HTML
-# 2. 归档结果到 output/
-# 3. 生成最终结论
+# 1. 查看分析摘要
+python3 -m src.workflow_orchestrator --mode analyze --input output/ashare_factor_report.csv
+
+# 2. 生成最终 HTML 报告
+python3 -m src.workflow_orchestrator --mode report --input output/ashare_factor_report.csv
+
+# 3. 归档结果
+cp output/factor_report.html output/factor_report_final.html
+cp output/factor_report.md output/factor_report_final.md
 ```
 
 ## 快速使用示例

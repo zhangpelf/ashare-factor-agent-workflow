@@ -11,7 +11,7 @@ import yfinance as yf
 
 from factors import compute_all_factors
 from factor_testing import FactorTestPipeline, FactorCorrelationAnalyzer
-from mine_factors import FactorMiningPipeline, winsorize
+from mine_factors import FactorMiningPipeline
 from utils import winsorize as winsorize_util
 
 print("=" * 65)
@@ -76,6 +76,18 @@ print(f"  区间: {df['date'].min().date()} → {df['date'].max().date()}")
 # ============================================================
 print("\n[2/6] 计算价格/成交量因子...")
 factor_df = compute_all_factors(df)
+
+# 检测基本面列是否全部缺失（yfinance 通常不包含财务数据）
+fundamental_cols = ["book_equity", "net_income", "sales", "gross_profit", "total_assets",
+                    "total_liabilities", "operating_income", "cfo", "total_debt",
+                    "current_assets", "current_liabilities", "depreciation"]
+available_fundamentals = [c for c in fundamental_cols if c in factor_df.columns and factor_df[c].notna().sum() > 10]
+if not available_fundamentals:
+    print("  ⚠ 基本面列不可用（yfinance 无财务数据），仅使用量价因子")
+    print("    建议: 接入 Wind/Juyuan/Choice 等含财务数据的源")
+else:
+    print(f"  基本面列可用: {len(available_fundamentals)}/{len(fundamental_cols)}")
+
 price_cols = [c for c in factor_df.columns
               if c not in ['stock_id', 'date', 'return', 'forward_1d_ret']
               and factor_df[c].notna().sum() > 100]  # 只保留有足够数据的因子

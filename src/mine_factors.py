@@ -7,6 +7,7 @@ from typing import List, Dict, Optional, Tuple, Callable
 from sklearn.linear_model import LassoCV, ElasticNetCV
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import TimeSeriesSplit
 
 logger = logging.getLogger(__name__)
@@ -52,10 +53,12 @@ def walk_forward_split(
 # 1. Group LASSO 因子筛选
 # ============================================================
 
-class GroupLASSOSelector:
-    """Group LASSO 因子筛选 (Freyberger, Neuhierl & Weber 2020 风格)
+class LassoSelector:
+    """LASSO 因子筛选 (基于 LassoCV)
 
-    按因子类别分组进行 LASSO 筛选，识别显著因子组
+    注意：本实现为标准 LassoCV（L1 正则化），并非真正的 Group LASSO。
+    如需实现 Freyberger, Neuhierl & Weber (2020) 的 Group LASSO，
+    需要使用专门的 group-lasso 求解器（如 group_lasso 包）。
     """
 
     def __init__(
@@ -71,22 +74,22 @@ class GroupLASSOSelector:
         self.selected_features: List[str] = []
         self.feature_importance: Dict[str, float] = {}
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "GroupLASSOSelector":
-        """训练 Group LASSO 模型"""
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "LassoSelector":
+        """训练 LASSO 模型（StandardScaler 在 Pipeline 内部，避免 CV 泄露）"""
         tscv = TimeSeriesSplit(n_splits=self.cv)
 
-        self.model = LassoCV(
-            alphas=self.alpha_range,
-            cv=tscv,
-            random_state=self.random_state,
-            max_iter=10000,
-        )
+        pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("lasso", LassoCV(
+                alphas=self.alpha_range,
+                cv=tscv,
+                random_state=self.random_state,
+                max_iter=10000,
+            )),
+        ])
 
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-
-        self.model.fit(X_scaled, y)
+        pipeline.fit(X, y)
+        self.model = pipeline.named_steps["lasso"]
 
         coef = pd.Series(self.model.coef_, index=X.columns)
         self.selected_features = coef[abs(coef) > 1e-6].index.tolist()
@@ -122,17 +125,18 @@ class ElasticNetSelector:
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "ElasticNetSelector":
         tscv = TimeSeriesSplit(n_splits=self.cv)
-        self.model = ElasticNetCV(
-            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
-            cv=tscv,
-            random_state=self.random_state,
-            max_iter=10000,
-        )
+        pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("enet", ElasticNetCV(
+                l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
+                cv=tscv,
+                random_state=self.random_state,
+                max_iter=10000,
+            )),
+        ])
 
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-        self.model.fit(X_scaled, y)
+        pipeline.fit(X, y)
+        self.model = pipeline.named_steps["enet"]
 
         coef = pd.Series(self.model.coef_, index=X.columns)
         self.selected_features = coef[abs(coef) > 1e-6].index.tolist()
@@ -172,11 +176,8 @@ class RandomForestSelector:
             n_jobs=-1,
         )
 
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-
-        self.model.fit(X_scaled, y)
+        # 树模型无需特征缩放
+        self.model.fit(X, y)
         self.feature_importance = pd.Series(
             self.model.feature_importances_, index=X.columns
         ).sort_values(ascending=False)
@@ -215,11 +216,8 @@ class GradientBoostingSelector:
             random_state=self.random_state,
         )
 
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-
-        self.model.fit(X_scaled, y)
+        # 树模型无需特征缩放
+        self.model.fit(X, y)
         return self
 
     def get_importance(self) -> pd.Series:
@@ -390,6 +388,7 @@ class FactorMiningPipeline:
     """完整的因子挖掘流水线
 
     集成多种数据挖掘方法，筛选、排序、生成新因子
+    支持单截面模式（快速）和 walk-forward 模式（跨时段稳定性评估）
     """
 
     def __init__(self, methods: Optional[List[str]] = None):
@@ -397,31 +396,34 @@ class FactorMiningPipeline:
         self.results: Dict[str, Dict] = {}
         self.selected_factors: List[str] = []
         self.new_formulas: List[Dict] = []
+        self._period_results: List[Dict] = []  # walk-forward 每期结果
 
-    def run(
+    def _run_single(
         self,
         X: pd.DataFrame,
         y: pd.Series,
         gp_generations: int = 10,
-    ) -> "FactorMiningPipeline":
-        """运行所有挖掘方法"""
+    ) -> Dict[str, Dict]:
+        """在单个截面上运行所有挖掘方法"""
+        results = {}
+
         if "lasso" in self.methods:
-            lasso = GroupLASSOSelector()
-            lasso.fit(X, y)
-            self.results["lasso"] = {
-                "selected": lasso.get_selected(),
-                "importance": lasso.get_importance(),
+            model = LassoSelector()
+            model.fit(X, y)
+            results["lasso"] = {
+                "selected": model.get_selected(),
+                "importance": model.get_importance(),
             }
 
         if "elastic_net" in self.methods:
-            enet = ElasticNetSelector()
-            enet.fit(X, y)
-            self.results["elastic_net"] = {"selected": enet.get_selected()}
+            model = ElasticNetSelector()
+            model.fit(X, y)
+            results["elastic_net"] = {"selected": model.get_selected()}
 
         if "random_forest" in self.methods:
             rf = RandomForestSelector()
             rf.fit(X, y)
-            self.results["random_forest"] = {
+            results["random_forest"] = {
                 "importance": rf.feature_importance.to_dict(),
                 "top10": rf.get_top_k(10),
             }
@@ -429,20 +431,25 @@ class FactorMiningPipeline:
         if "gradient_boosting" in self.methods:
             gb = GradientBoostingSelector()
             gb.fit(X, y)
-            self.results["gradient_boosting"] = {
+            results["gradient_boosting"] = {
                 "importance": gb.get_importance().to_dict()
             }
 
         if "genetic_programming" in self.methods:
             gp = GeneticProgrammingMiner(generations=gp_generations)
             gp.fit(X, y)
-            self.results["genetic_programming"] = {
+            results["genetic_programming"] = {
                 "best_formula": gp.best_formula,
                 "best_fitness": gp.best_fitness,
                 "history": gp.history,
             }
 
-        # 整合：至少被2种方法选中的因子
+        return results
+
+    def _consensus_selection(self, selected_sets_per_method: Dict[str, list]) -> List[str]:
+        """跨方法共识：至少被2种方法选中的因子"""
+        from collections import Counter
+
         selected_sets = []
         for method, res in self.results.items():
             if method == "genetic_programming":
@@ -452,15 +459,126 @@ class FactorMiningPipeline:
             if "top10" in res:
                 selected_sets.append(set(res["top10"]))
 
-        if selected_sets:
-            from collections import Counter
-            all_selected = Counter()
-            for s in selected_sets:
-                for f in s:
-                    all_selected[f] += 1
-            n_methods = len(selected_sets)
-            self.selected_factors = [f for f, c in all_selected.items() if c >= max(2, n_methods // 2)]
+        if not selected_sets:
+            return []
 
+        all_selected = Counter()
+        for s in selected_sets:
+            for f in s:
+                all_selected[f] += 1
+        n_methods = len(selected_sets)
+        return [f for f, c in all_selected.items() if c >= max(2, n_methods // 2)]
+
+    def run(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        gp_generations: int = 10,
+        use_walk_forward: bool = False,
+        df: Optional[pd.DataFrame] = None,
+        feature_cols: Optional[List[str]] = None,
+        date_col: str = "date",
+    ) -> "FactorMiningPipeline":
+        """运行所有挖掘方法
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            特征矩阵（单截面）
+        y : pd.Series
+            目标变量
+        gp_generations : int
+            遗传规划迭代次数
+        use_walk_forward : bool
+            是否启用 walk-forward 跨时段验证
+        df : pd.DataFrame, optional
+            完整因子 DataFrame（walk-forward 时需要）
+        feature_cols : list, optional
+            因子列名列表
+        date_col : str
+            日期列名
+        """
+        if use_walk_forward and df is not None and feature_cols is not None:
+            return self._run_walk_forward(df, feature_cols, gp_generations, date_col)
+
+        # 单截面模式（默认）
+        self.results = self._run_single(X, y, gp_generations)
+        self.selected_factors = self._consensus_selection(self.results)
+        return self
+
+    def _run_walk_forward(
+        self,
+        df: pd.DataFrame,
+        feature_cols: List[str],
+        gp_generations: int = 10,
+        date_col: str = "date",
+    ) -> "FactorMiningPipeline":
+        """跨时段 walk-forward 挖掘：对每个时间窗口运行挖掘方法
+
+        取跨时段共识选中的因子（在至少2个时段中被选中）
+        """
+        from collections import Counter
+
+        splits = walk_forward_split(df, n_splits=3, date_col=date_col)
+        logger.info(f"Walk-forward: {len(splits)} time splits")
+
+        period_selected = {m: Counter() for m in self.methods if m != "genetic_programming"}
+        all_period_formulas = []
+
+        for i, (train, test) in enumerate(splits):
+            logger.info(f"  Period {i+1}/{len(splits)}: train={train[date_col].min().date()}→{train[date_col].max().date()}, "
+                        f"test={test[date_col].min().date()}→{test[date_col].max().date()}")
+
+            # 用训练集最后一个截面做挖掘
+            last_train_date = train[date_col].max()
+            cross = train[train[date_col] == last_train_date]
+            X_fold = cross[feature_cols].fillna(0)
+            y_fold = cross["forward_1d_ret"].fillna(0)
+
+            if len(X_fold) < 10:
+                continue
+
+            fold_results = self._run_single(X_fold, y_fold, gp_generations)
+
+            for method in period_selected:
+                if method == "lasso" and "selected" in fold_results.get("lasso", {}):
+                    for f in fold_results["lasso"]["selected"]:
+                        period_selected[method][f] += 1
+                if method == "elastic_net" and "selected" in fold_results.get("elastic_net", {}):
+                    for f in fold_results["elastic_net"]["selected"]:
+                        period_selected[method][f] += 1
+                if method == "random_forest" and "top10" in fold_results.get("random_forest", {}):
+                    for f in fold_results["random_forest"]["top10"]:
+                        period_selected[method][f] += 1
+                if method == "gradient_boosting" and "importance" in fold_results.get("gradient_boosting", {}):
+                    imp = fold_results["gradient_boosting"]["importance"]
+                    top = sorted(imp, key=imp.get, reverse=True)[:10]
+                    for f in top:
+                        period_selected[method][f] += 1
+
+            if "genetic_programming" in fold_results:
+                all_period_formulas.append(fold_results["genetic_programming"])
+
+        # 跨时段共识：在至少2个时段中被选中的因子
+        n_periods = len(splits)
+        all_selected = Counter()
+        for method, counter in period_selected.items():
+            for f, count in counter.items():
+                all_selected[f] += 1  # 每个方法算一票
+
+        self.selected_factors = [f for f, c in all_selected.items() if c >= max(2, n_periods)]
+        self.results = {
+            "walk_forward": {
+                "period_details": {m: dict(c) for m, c in period_selected.items()},
+                "n_periods": n_periods,
+                "n_formulas": len(all_period_formulas),
+            }
+        }
+        if all_period_formulas:
+            best = max(all_period_formulas, key=lambda x: x.get("best_fitness", -1))
+            self.results["walk_forward"]["best_formula"] = best.get("best_formula")
+
+        logger.info(f"Walk-forward consensus: {len(self.selected_factors)} factors selected across {n_periods} periods")
         return self
 
     def summary(self) -> pd.DataFrame:
@@ -473,5 +591,8 @@ class FactorMiningPipeline:
                 rows.append({"method": method, "n_selected": len(res["top10"])})
             elif "best_formula" in res:
                 rows.append({"method": method, "n_selected": 1, "formula": res["best_formula"]})
+            elif "period_details" in res:
+                rows.append({"method": "walk_forward", "n_selected": len(self.selected_factors),
+                             "periods": res.get("n_periods", 0)})
 
         return pd.DataFrame(rows)

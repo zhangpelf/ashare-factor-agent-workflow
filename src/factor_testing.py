@@ -93,10 +93,12 @@ class ICAnalyzer:
 class GroupBacktester:
     """分组回测：按因子值分组计算组合收益"""
 
-    def __init__(self, n_groups: int = 10):
+    def __init__(self, n_groups: int = 10, tcost_bps: float = 0):
         self.n_groups = n_groups
+        self.tcost_bps = tcost_bps  # 双边交易成本（基点），如 10 = 0.1%
         self.group_returns: Optional[pd.DataFrame] = None
         self.long_short: Optional[pd.Series] = None
+        self._prev_weights: Optional[Dict[int, pd.Series]] = None  # 上一期持仓权重
 
     def compute(
         self,
@@ -106,8 +108,9 @@ class GroupBacktester:
         date_col: str = "date",
         weight_col: Optional[str] = None,
     ) -> pd.DataFrame:
-        """计算每日分组收益"""
+        """计算每日分组收益（含可选的交易成本）"""
         group_rets = []
+        self._prev_weights = None
 
         for date, group in df.groupby(date_col):
             group = group.dropna(subset=[factor_col, ret_col])
@@ -119,15 +122,46 @@ class GroupBacktester:
             except ValueError:
                 continue
 
+            # 等权持仓
             if weight_col and weight_col in group.columns:
-                weights = group.groupby("group")[weight_col].transform(lambda x: x / x.sum())
                 grp_ret = group.groupby("group").apply(
-                    lambda g: (g[ret_col] * g.get(weight_col, 1)).sum() / g.get(weight_col, 1).sum()
-                    if weight_col and g[weight_col].sum() > 0
+                    lambda g: (g[ret_col] * g[weight_col]).sum() / g[weight_col].sum()
+                    if g[weight_col].sum() > 0
                     else g[ret_col].mean()
                 )
             else:
                 grp_ret = group.groupby("group")[ret_col].mean()
+
+            # 交易成本：基于组合换手率
+            if self.tcost_bps > 0 and self._prev_weights is not None:
+                tcost_penalty = {}
+                current_weights = {}
+                for g in range(self.n_groups):
+                    g_idx = set(group[group["group"] == g].index)
+                    current_weights[g] = g_idx
+                    if g in self._prev_weights:
+                        prev = self._prev_weights[g]
+                        # 换手率 = 1 - 交集/并集（新进+退出）
+                        if len(prev) > 0:
+                            intersection = len(g_idx & prev)
+                            union = len(g_idx | prev)
+                            turnover = 1 - intersection / max(union, 1)
+                        else:
+                            turnover = 1.0
+                    else:
+                        turnover = 1.0
+                    tcost_penalty[g] = turnover * (self.tcost_bps / 10000)
+
+                for g in grp_ret.index:
+                    if g in tcost_penalty:
+                        grp_ret[g] -= tcost_penalty[g]
+
+                self._prev_weights = current_weights
+            elif self.tcost_bps > 0:
+                self._prev_weights = {
+                    g: set(group[group["group"] == g].index)
+                    for g in range(self.n_groups)
+                }
 
             grp_ret.name = date
             group_rets.append(grp_ret)
@@ -395,8 +429,9 @@ class TurnoverAnalyzer:
 class FactorTestPipeline:
     """因子综合测试流水线"""
 
-    def __init__(self, annual_factor: int = 252):
+    def __init__(self, annual_factor: int = 252, tcost_bps: float = 0):
         self.annual_factor = annual_factor
+        self.tcost_bps = tcost_bps
         self.results: Dict[str, FactorTestResult] = {}
 
     def test_factor(
@@ -421,8 +456,8 @@ class FactorTestPipeline:
         result.ic_positive_ratio = ic_summary.get("positive_ratio", 0)
         result.ic_series = ic_series
 
-        # 2. 分组回测
-        backtester = GroupBacktester(n_groups=n_groups)
+        # 2. 分组回测（含交易成本）
+        backtester = GroupBacktester(n_groups=n_groups, tcost_bps=self.tcost_bps)
         grp_rets = backtester.compute(df, factor_col, ret_col, date_col)
         result.group_returns = grp_rets
         bt_summary = backtester.summary(self.annual_factor)

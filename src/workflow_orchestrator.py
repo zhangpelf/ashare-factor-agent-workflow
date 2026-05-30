@@ -524,7 +524,7 @@ def generate_all_figures(
 ) -> Dict[str, str]:
     """生成所有因子图表（自动补全缺失的计算）"""
     try:
-        from src.viz import save_all_factor_charts
+        from src.viz import save_all_factor_charts, plot_ic_decay
 
         ic_series_dict = ic_series_dict or {}
         group_returns_dict = group_returns_dict or {}
@@ -549,6 +549,25 @@ def generate_all_figures(
             output_dir=output_dir,
             factor_list=factor_list,
         )
+
+        # 额外生成 IC 衰减图
+        if factor_df is not None and factor_list:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            for factor in factor_list:
+                zcol = factor if factor.endswith("_z") else factor + "_z"
+                if zcol in factor_df.columns:
+                    decay_path = output_path / f"ic_decay_{factor}.pdf"
+                    try:
+                        plot_ic_decay(
+                            factor_df, zcol,
+                            save_path=str(decay_path),
+                            title=f"IC 衰减: {factor}",
+                        )
+                        figures[f"ic_decay_{factor}"] = str(decay_path)
+                    except Exception:
+                        continue
+
         return figures
     except ImportError as e:
         logger.warning(f"viz module not available: {e}")
@@ -575,7 +594,7 @@ def analyze_results(summary: pd.DataFrame) -> Dict:
         (summary["Mean_IC"].abs() > 0.01) & (summary["Sharpe"].abs() > 0.5)
     ]
 
-    return {
+    analysis = {
         "n_factors": len(summary),
         "valid_ic": n_valid_ic,
         "valid_sharpe": n_valid_sharpe,
@@ -586,6 +605,14 @@ def analyze_results(summary: pd.DataFrame) -> Dict:
         "quality": "高" if len(valid_factors) / max(len(summary), 1) > 0.3
                    else "中" if len(valid_factors) > 0 else "低",
     }
+
+    # IC 方向稳定性（正值比）
+    if "IC正比例" in summary.columns:
+        stable_ic = int((summary["IC正比例"] > 0.55).sum())
+        analysis["stable_ic_direction"] = stable_ic
+        analysis["unstable_ic_direction"] = n_valid_ic - stable_ic
+
+    return analysis
 
 
 # ============================================================
