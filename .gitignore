@@ -31,3 +31,8 @@ review-stage/
 
 # OMC state
 .omc/
+.omx/
+
+# Research artifacts
+research-wiki/
+research/

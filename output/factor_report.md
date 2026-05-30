@@ -36,22 +36,22 @@
 
 ## 4. 可视化分析
 ### 4.1 IC 时间序列
-![ic_series_momentum_6m_z](../figures/ic_series_momentum_6m_z.pdf)
-![ic_series_st_reversal_1m_z](../figures/ic_series_st_reversal_1m_z.pdf)
-![ic_series_max_ret_1m_z](../figures/ic_series_max_ret_1m_z.pdf)
-![ic_series_amihud_illiq_z](../figures/ic_series_amihud_illiq_z.pdf)
+![ic_series_momentum_6m_z](../figures/png/ic_series_momentum_6m_z.png)
+![ic_series_st_reversal_1m_z](../figures/png/ic_series_st_reversal_1m_z.png)
+![ic_series_max_ret_1m_z](../figures/png/ic_series_max_ret_1m_z.png)
+![ic_series_amihud_illiq_z](../figures/png/ic_series_amihud_illiq_z.png)
 
 ### 4.2 累计收益
-![cumulative_returns_beta_z](../figures/cumulative_returns_beta_z.pdf)
-![cumulative_returns_size_z](../figures/cumulative_returns_size_z.pdf)
-![cumulative_returns_momentum_6m_z](../figures/cumulative_returns_momentum_6m_z.pdf)
-![cumulative_returns_max_ret_1m_z](../figures/cumulative_returns_max_ret_1m_z.pdf)
+![cumulative_returns_beta_z](../figures/png/cumulative_returns_beta_z.png)
+![cumulative_returns_size_z](../figures/png/cumulative_returns_size_z.png)
+![cumulative_returns_momentum_6m_z](../figures/png/cumulative_returns_momentum_6m_z.png)
+![cumulative_returns_max_ret_1m_z](../figures/png/cumulative_returns_max_ret_1m_z.png)
 
 ### 4.3 因子分布
-![distribution_amihud_illiq_z](../figures/distribution_amihud_illiq_z.pdf)
-![distribution_momentum_6m_z](../figures/distribution_momentum_6m_z.pdf)
-![distribution_size_z](../figures/distribution_size_z.pdf)
-![distribution_beta_z](../figures/distribution_beta_z.pdf)
+![distribution_amihud_illiq_z](../figures/png/distribution_amihud_illiq_z.png)
+![distribution_momentum_6m_z](../figures/png/distribution_momentum_6m_z.png)
+![distribution_size_z](../figures/png/distribution_size_z.png)
+![distribution_beta_z](../figures/png/distribution_beta_z.png)
 
 
 ## 6. 结论与建议
