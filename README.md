@@ -2,7 +2,7 @@
 
 > Automated quantitative factor mining, testing, and reporting pipeline for China A-share market — with ARIS adversarial review loop.
 
-![Report Screenshot](output/factor_report_screenshot.png)
+![Report Screenshot](https://raw.githubusercontent.com/zhangpelf/ashare-factor-mining/main/output/factor_report_screenshot.png)
 
 ## Overview
 
