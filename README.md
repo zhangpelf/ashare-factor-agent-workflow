@@ -129,17 +129,20 @@ python3 -m src.workflow_orchestrator --mode analyze
 | max_ret_1m | Maximum daily return over 1 month | - |
 | ivol_capm | Idiosyncratic volatility (CAPM residuals) | - |
 
-## Skills (Claude Code Integration)
+## Companion Project: Claude Code Skills Pack
 
-The workflow integrates with Claude Code through these skills:
+This repo handles the Python computation pipeline. The **Claude Code skills** that orchestrate the end-to-end workflow (literature survey → mining → evaluation → final report) live in a separate companion project:
+
+👉 **[ashare-factor-workflow](https://github.com/zhangpelf/ashare-factor-workflow)**
 
 | Skill | Purpose |
 |-------|---------|
-| `auto-因子提取` | Main workflow orchestrator |
-| `auto-因子图表` | Chart generation (IC series, cumulative returns, etc.) |
-| `auto-因子评估` | Factor effectiveness assessment |
-| `auto-因子报告` | Structured report writing |
-| `auto-因子分析` | Factor experiment analysis |
+| `auto-因子提取` | Pipeline orchestrator — 43 factors, 9 mining methods |
+| `auto-因子分析` | IC/IR/Sharpe analysis, literature cross-reference |
+| `auto-因子评估` | 6-dimension scoring (有效/可疑/无效) |
+| `auto-因子图表` | 24 publication-quality figures |
+| `auto-因子报告` | Structured report generation (Markdown + Excel) |
+| `auto-撰写报告` | 8-module final report with decision gates |
 
 ## Output Structure
 
