@@ -34,7 +34,8 @@ def load_akshare(start_date: str, end_date: str, max_stocks: int) -> pd.DataFram
     """通过 akshare（新浪财经）加载 A 股数据"""
     from akshare_data import AShareData
     ds = AShareData()
-    df = ds.build_factor_df(start_date, end_date, max_stocks, with_financials=True)
+    df = ds.build_factor_df(start_date, end_date, max_stocks, with_financials=False)
+    # 注意: with_financials=False 仅量价因子; 东方财富API不稳定时跳过财务数据
     # 重命名 stock_id 去掉前缀以兼容因子函数
     return df
 
@@ -189,7 +190,7 @@ def main():
                 selected.update(res['selected'])
             if 'top10' in res:
                 selected.update(res['top10'])
-        test_factors = list(selected)[:8] or price_cols[:5]
+        test_factors = list(selected)[:15] or price_cols[:8]
     else:
         test_factors = price_cols[:5]
         print(f"  截面不足 (n={len(cross)})")

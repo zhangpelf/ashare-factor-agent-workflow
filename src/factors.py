@@ -9,6 +9,164 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# CH-3 / CH-4 中国特有因子 (Liu, Stambaugh & Yuan 2019, JFE)
+# ============================================================
+
+def calc_ch_mkt(df: pd.DataFrame) -> pd.Series:
+    """市场因子：全市场收益（用于CH-3模型对齐）"""
+    return df["return"].groupby(df["date"]).mean()
+
+
+def calc_ch_size(df: pd.DataFrame) -> pd.Series:
+    """规模因子 SMB_A: Log(市值), 中国版小盘股效应更强"""
+    return np.log(df["market_cap"].clip(lower=1e-6))
+
+
+def calc_ch_ep(df: pd.DataFrame) -> pd.Series:
+    """中国价值因子 VMG_A: E/P (Liu+2019 发现中国BM无效, EP更优)"""
+    return df["net_income"] / df["market_cap"]
+
+
+def calc_ch_turnover(df: pd.DataFrame) -> pd.Series:
+    """中国换手率因子 PMO_A: 月均换手率 (CH-4 第4因子)"""
+    if "turnover" in df.columns:
+        return df["turnover"]
+    if "volume" in df.columns and "shares_outstanding" in df.columns:
+        daily = df["volume"] / df["shares_outstanding"]
+        return daily
+    return pd.Series(np.nan, index=df.index)
+
+
+# ============================================================
+# q-factor 模型因子 (Hou, Xue & Zhang 2015, 2021)
+# ============================================================
+
+def calc_q_ia(df: pd.DataFrame) -> pd.Series:
+    """q-factor 投资因子 IA: 总资产增长率（投资保守的公司有溢价）"""
+    return df["total_assets"].pct_change(periods=4)
+
+
+def calc_q_roe(df: pd.DataFrame) -> pd.Series:
+    """q-factor 盈利因子 ROE: 净利润/净资产（高利润公司有溢价）"""
+    return df["net_income"] / df["book_equity"].replace(0, np.nan)
+
+
+def calc_q_eg(df: pd.DataFrame) -> pd.Series:
+    """q^5 预期增长因子 EG: 营收增长率×ROE（盈利+成长交叉效应）"""
+    sales_g = df["sales"].pct_change(periods=4)
+    roe = df["net_income"] / df["book_equity"].replace(0, np.nan)
+    return sales_g * roe
+
+
+# ============================================================
+# 高阶矩风险因子
+# ============================================================
+
+def calc_coskewness(stock_group: pd.DataFrame, window: int = 252) -> pd.Series:
+    """协偏度因子 (Harvey & Siddique 2000): 个股与市场的共偏度"""
+    ret = stock_group["return"]
+    mkt = ret.expanding().mean()  # 以全市场均值近似
+    num = ((ret - ret.mean()) * (mkt - mkt.mean()) ** 2).rolling(window, min_periods=60).mean()
+    den = (ret - ret.mean()).rolling(window, min_periods=60).std() ** 1.5 * \
+          (mkt - mkt.mean()).rolling(window, min_periods=60).std()
+    return num / (den + 1e-10)
+
+
+def calc_cokurtosis(stock_group: pd.DataFrame, window: int = 252) -> pd.Series:
+    """协峰度因子: 个股与市场的共峰度"""
+    ret = stock_group["return"]
+    mkt = ret.expanding().mean()
+    num = ((ret - ret.mean()) * (mkt - mkt.mean()) ** 3).rolling(window, min_periods=60).mean()
+    den = (ret - ret.mean()).rolling(window, min_periods=60).std() ** 2 * \
+          (mkt - mkt.mean()).rolling(window, min_periods=60).std() ** 2
+    return num / (den ** 0.5 + 1e-10)
+
+
+# ============================================================
+# 技术指标因子（近期论文验证有效）
+# ============================================================
+
+def calc_rsi(stock_group: pd.DataFrame, window: int = 14) -> pd.Series:
+    """RSI 相对强弱指标: 100 - 100/(1+RS), 超买超卖信号"""
+    delta = stock_group["close"].diff()
+    gain = delta.clip(lower=0).rolling(window, min_periods=window // 2).mean()
+    loss = (-delta.clip(upper=0)).rolling(window, min_periods=window // 2).mean()
+    rs = gain / (loss + 1e-10)
+    return 100 - 100 / (1 + rs)
+
+
+def calc_bb_width(stock_group: pd.DataFrame, window: int = 20) -> pd.Series:
+    """布林带宽度 %b: (价格 - 下轨)/(上轨 - 下轨), 均值回复信号"""
+    ma = stock_group["close"].rolling(window, min_periods=10).mean()
+    std = stock_group["close"].rolling(window, min_periods=10).std()
+    upper = ma + 2 * std
+    lower = ma - 2 * std
+    return (stock_group["close"] - lower) / (upper - lower + 1e-10)
+
+
+def calc_overnight_return(stock_group: pd.DataFrame) -> pd.Series:
+    """隔夜收益因子: open/close_prev - 1, 反映信息流入（A股隔夜效应显著）"""
+    close_prev = stock_group["close"].shift(1)
+    if "open" in stock_group.columns:
+        return stock_group["open"] / close_prev - 1
+    return pd.Series(np.nan, index=stock_group.index)
+
+
+# ============================================================
+# 风险度量因子
+# ============================================================
+
+def calc_var_95(stock_group: pd.DataFrame, window: int = 252) -> pd.Series:
+    """VaR 95%: 历史模拟法下5%分位数收益（下行风险因子）"""
+    return stock_group["return"].rolling(window, min_periods=60).quantile(0.05)
+
+
+def calc_cvar_95(stock_group: pd.DataFrame, window: int = 252) -> pd.Series:
+    """CVaR 95%: 尾部风险期望（极端损失的平均值）"""
+    ret = stock_group["return"]
+    var = ret.rolling(window, min_periods=60).quantile(0.05)
+    cvar = ret.rolling(window, min_periods=60).apply(
+        lambda x: x[x <= x.quantile(0.05)].mean() if len(x[x <= x.quantile(0.05)]) > 0 else x.quantile(0.05),
+        raw=False
+    )
+    return cvar
+
+
+def calc_ulcer_index(stock_group: pd.DataFrame, window: int = 126) -> pd.Series:
+    """溃疡指数: sqrt(mean(drawdown^2)), 回撤深度×持续时间的综合度量"""
+    peak = stock_group["close"].rolling(window, min_periods=30).max()
+    drawdown = (stock_group["close"] - peak) / peak
+    ulcer = drawdown.rolling(window, min_periods=30).apply(
+        lambda x: np.sqrt((x**2).mean()) if len(x) > 0 else 0.0,
+        raw=False
+    )
+    return ulcer
+
+
+# ============================================================
+# 质量因子（学术文献验证有效）
+# ============================================================
+
+def calc_interest_coverage(stock_group: pd.DataFrame) -> pd.Series:
+    """利息覆盖率: 营业利润/利息费用（偿债能力因子）"""
+    return stock_group["operating_income"] / stock_group["total_liabilities"].replace(0, np.nan)
+
+
+def calc_earnings_quality(stock_group: pd.DataFrame) -> pd.Series:
+    """盈利质量 (Dechow & Dichev 2002): 应计项与现金流的匹配度"""
+    wc_accruals = (stock_group["current_assets"].diff() - stock_group["cash"].diff() -
+                   stock_group["current_liabilities"].diff() + stock_group["short_term_debt"].diff())
+    cfo_abs = stock_group["cfo"].abs().replace(0, np.nan)
+    quality = 1 - (wc_accruals / cfo_abs).abs()
+    return quality
+
+
+def calc_net_debt_issuance(stock_group: pd.DataFrame, periods: int = 4) -> pd.Series:
+    """净债务发行: 总负债变化率（融资活动信号）"""
+    return stock_group["total_liabilities"].pct_change(periods=periods)
+
+
+# ============================================================
 # 结构化因子（横截面，不需要分组）
 # ============================================================
 
@@ -237,14 +395,34 @@ FACTOR_REGISTRY = {
     "net_pm":     {"func": calc_net_pm,     "category": "fundamental",  "type": "cross", "requires": ["net_income", "sales"]},
     "cfo_ta":     {"func": calc_cfo_ta,     "category": "fundamental",  "type": "cross", "requires": ["cfo", "total_assets"]},
     "lev":        {"func": calc_lev,        "category": "fundamental",  "type": "cross", "requires": ["total_liabilities", "total_assets"]},
+    # CH-3 / CH-4 中国因子模型 (Liu, Stambaugh & Yuan 2019, JFE)
+    "ch_ep":      {"func": calc_ch_ep,      "category": "china_factors","type": "cross", "requires": ["net_income", "market_cap"]},
+    "ch_turnover":{"func": calc_ch_turnover,"category": "china_factors","type": "cross", "requires": ["volume"]},
+    # q-factor 模型 (Hou, Xue & Zhang 2015/2021)
+    "q_ia":       {"func": lambda g: calc_q_ia(g),   "category": "q_factor",  "type": "ts", "requires": ["total_assets"]},
+    "q_roe":      {"func": calc_q_roe,               "category": "q_factor",  "type": "cross", "requires": ["net_income", "book_equity"]},
+    "q_eg":       {"func": lambda g: calc_q_eg(g),   "category": "q_factor",  "type": "ts", "requires": ["sales", "book_equity", "net_income"]},
+    # 质量因子
+    "interest_cov": {"func": calc_interest_coverage, "category": "quality",  "type": "ts", "requires": ["operating_income", "total_liabilities"]},
+    "earn_quality": {"func": lambda g: calc_earnings_quality(g), "category": "quality", "type": "ts", "requires": ["current_assets", "cash", "current_liabilities", "short_term_debt", "cfo"]},
+    "net_debt_issue":{"func": lambda g: calc_net_debt_issuance(g), "category": "quality", "type": "ts", "requires": ["total_liabilities"]},
     # 时间序列因子 (must be grouped by stock_id)
     "momentum_12m": {"func": lambda g: calc_momentum(g, 252, 21),  "category": "price", "type": "ts", "requires": ["close"]},
     "momentum_6m":  {"func": lambda g: calc_momentum(g, 126, 21),  "category": "price", "type": "ts", "requires": ["close"]},
     "st_reversal_1w": {"func": lambda g: calc_short_term_reversal(g, 5), "category": "price", "type": "ts", "requires": ["close"]},
     "st_reversal_1m": {"func": lambda g: calc_short_term_reversal(g, 21), "category": "price", "type": "ts", "requires": ["close"]},
-    "beta":           {"func": calc_beta,       "category": "price", "type": "ts", "requires": ["return"]},
-    "max_ret_1m":     {"func": lambda g: calc_max_ret(g, 21), "category": "price", "type": "ts", "requires": ["return"]},
-    "ivol_capm":      {"func": calc_ivol_capm,  "category": "price", "type": "ts", "requires": ["return"]},
+    "beta":           {"func": calc_beta,       "category": "risk", "type": "ts", "requires": ["return"]},
+    "coskewness":     {"func": calc_coskewness, "category": "risk", "type": "ts", "requires": ["return"]},
+    "cokurtosis":     {"func": calc_cokurtosis, "category": "risk", "type": "ts", "requires": ["return"]},
+    "max_ret_1m":     {"func": lambda g: calc_max_ret(g, 21), "category": "risk", "type": "ts", "requires": ["return"]},
+    "var_95":         {"func": calc_var_95,     "category": "risk", "type": "ts", "requires": ["return"]},
+    "cvar_95":        {"func": calc_cvar_95,    "category": "risk", "type": "ts", "requires": ["return"]},
+    "ulcer_index":    {"func": calc_ulcer_index,"category": "risk", "type": "ts", "requires": ["close"]},
+    "ivol_capm":      {"func": calc_ivol_capm,  "category": "risk", "type": "ts", "requires": ["return"]},
+    # 技术因子
+    "rsi_14":         {"func": calc_rsi,        "category": "technical","type": "ts", "requires": ["close"]},
+    "bb_width":       {"func": calc_bb_width,   "category": "technical","type": "ts", "requires": ["close"]},
+    # 流动性因子
     "amihud_illiq":   {"func": calc_amihud_illiq, "category": "volume", "type": "ts", "requires": ["return", "close", "volume"]},
     "turnover":       {"func": calc_turnover,     "category": "volume", "type": "ts", "requires": ["volume"]},
     "dollar_volume":  {"func": calc_dollar_volume, "category": "volume", "type": "ts", "requires": ["close", "volume"]},

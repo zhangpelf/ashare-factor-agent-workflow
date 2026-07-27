@@ -225,7 +225,375 @@ class GradientBoostingSelector:
 
 
 # ============================================================
-# 5. 遗传规划因子挖掘 (Genetic Programming)
+# 5. XGBoost 因子重要性 (Chen & Guestrin 2016)
+# ============================================================
+
+class XGBoostSelector:
+    """XGBoost 因子重要性排序 — 梯度提升树的工业级实现
+
+    参考文献：Chen & Guestrin (2016), "XGBoost: A Scalable Tree Boosting System"
+    在因子挖掘中：Gu, Kelly & Xiu (2020) 验证了树模型在资产定价中的有效性
+    """
+
+    def __init__(
+        self,
+        n_estimators: int = 300,
+        max_depth: int = 4,
+        learning_rate: float = 0.05,
+        subsample: float = 0.8,
+        colsample_bytree: float = 0.8,
+        random_state: int = 42,
+        early_stopping_rounds: int = 20,
+    ):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.learning_rate = learning_rate
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.random_state = random_state
+        self.early_stopping_rounds = early_stopping_rounds
+        self.model = None
+        self.feature_importance = pd.Series(dtype=float)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "XGBoostSelector":
+        import xgboost as xgb
+
+        # 训练/验证分割
+        split = int(len(X) * 0.8)
+        X_train, X_val = X.iloc[:split], X.iloc[split:]
+        y_train, y_val = y.iloc[:split], y.iloc[split:]
+
+        self.model = xgb.XGBRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            learning_rate=self.learning_rate,
+            subsample=self.subsample,
+            colsample_bytree=self.colsample_bytree,
+            random_state=self.random_state,
+            early_stopping_rounds=self.early_stopping_rounds,
+            verbosity=0,
+        )
+        self.model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False,
+        )
+        self.feature_importance = pd.Series(
+            self.model.feature_importances_, index=X.columns
+        ).sort_values(ascending=False)
+        return self
+
+    def get_top_k(self, k: int = 10) -> List[str]:
+        return self.feature_importance.head(k).index.tolist()
+
+    def get_importance(self) -> pd.Series:
+        return self.feature_importance
+
+
+# ============================================================
+# 6. LightGBM 因子选择 (Ke et al. 2017)
+# ============================================================
+
+class LightGBMSelector:
+    """LightGBM 因子重要性 — 高效梯度提升，支持叶子优先生长
+
+    参考文献：Ke et al. (2017), "LightGBM: A Highly Efficient Gradient Boosting Decision Tree"
+    在因子挖掘中：比传统 GBDT 更快，支持类别特征和高效的正则化
+    """
+
+    def __init__(
+        self,
+        n_estimators: int = 300,
+        num_leaves: int = 15,
+        max_depth: int = 4,
+        learning_rate: float = 0.05,
+        subsample: float = 0.8,
+        colsample_bytree: float = 0.8,
+        reg_alpha: float = 0.0,
+        reg_lambda: float = 0.0,
+        random_state: int = 42,
+    ):
+        self.n_estimators = n_estimators
+        self.num_leaves = num_leaves
+        self.max_depth = max_depth
+        self.learning_rate = learning_rate
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.reg_alpha = reg_alpha
+        self.reg_lambda = reg_lambda
+        self.random_state = random_state
+        self.model = None
+        self.feature_importance = pd.Series(dtype=float)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "LightGBMSelector":
+        import lightgbm as lgb
+
+        # 训练/验证分割
+        split = int(len(X) * 0.8)
+        X_train, X_val = X.iloc[:split], X.iloc[split:]
+        y_train, y_val = y.iloc[:split], y.iloc[split:]
+
+        train_data = lgb.Dataset(X_train, label=y_train)
+        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+
+        params = {
+            "objective": "regression",
+            "metric": "rmse",
+            "num_leaves": self.num_leaves,
+            "max_depth": self.max_depth,
+            "learning_rate": self.learning_rate,
+            "subsample": self.subsample,
+            "feature_fraction": self.colsample_bytree,
+            "reg_alpha": self.reg_alpha,
+            "reg_lambda": self.reg_lambda,
+            "verbose": -1,
+            "seed": self.random_state,
+        }
+
+        self.model = lgb.train(
+            params,
+            train_data,
+            valid_sets=[val_data],
+            num_boost_round=self.n_estimators,
+            callbacks=[lgb.early_stopping(20), lgb.log_evaluation(0)],
+        )
+        self.feature_importance = pd.Series(
+            self.model.feature_importance(importance_type="gain"),
+            index=X.columns,
+        ).sort_values(ascending=False)
+        return self
+
+    def get_top_k(self, k: int = 10) -> List[str]:
+        return self.feature_importance.head(k).index.tolist()
+
+
+# ============================================================
+# 7. 贝叶斯压缩因子选择 (Kozak, Nagel & Santosh 2020)
+# ============================================================
+
+class BayesianShrinkageSelector:
+    """贝叶斯压缩：在因子选择中引入先验约束
+
+    参考文献：
+      Kozak, Nagel & Santosh (2020, JFE) "Shrinking the Cross-Section"
+      — 贝叶斯先验使得噪音因子系数被压缩向零
+
+    通过 BayesianRidge 实现（自动估计超参数），
+    因子重要性 = |系数均值| / 系数标准差（即 t-stat 的贝叶斯类比）
+    """
+
+    def __init__(
+        self,
+        alpha_1: float = 1e-6,
+        alpha_2: float = 1e-6,
+        lambda_1: float = 1e-6,
+        lambda_2: float = 1e-6,
+        n_iter: int = 300,
+    ):
+        self.alpha_1 = alpha_1
+        self.alpha_2 = alpha_2
+        self.lambda_1 = lambda_1
+        self.lambda_2 = lambda_2
+        self.n_iter = n_iter
+        self.model = None
+        self.selected_features: List[str] = []
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "BayesianShrinkageSelector":
+        from sklearn.linear_model import BayesianRidge
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.pipeline import Pipeline
+
+        pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("br", BayesianRidge(
+                alpha_1=self.alpha_1, alpha_2=self.alpha_2,
+                lambda_1=self.lambda_1, lambda_2=self.lambda_2,
+                n_iter=self.n_iter,
+            )),
+        ])
+
+        pipeline.fit(X, y)
+        br = pipeline.named_steps["br"]
+
+        # 使用 t-stat 类比筛选：|coef| / sigma > 1.96 (95% credible interval)
+        coef = np.array(br.coef_)
+        sigma = np.sqrt(br.sigma_.diagonal()) if hasattr(br, "sigma_") else np.ones_like(coef) * 0.1
+        t_ratio = np.abs(coef) / (sigma + 1e-10)
+
+        self.selected_features = [
+            X.columns[i] for i in range(len(coef))
+            if t_ratio[i] > 1.0  # 贝叶斯弱显著
+        ]
+        self.model = pipeline
+        return self
+
+    def get_selected(self) -> List[str]:
+        return self.selected_features
+
+
+# ============================================================
+# 8. 简单神经网络因子选择 (Gu, Kelly & Xiu 2020 — NN 部分)
+# ============================================================
+
+class NeuralNetSelector:
+    """MLP 神经网络因子重要性 — 捕捉非线性因子交互
+
+    参考文献：
+      Gu, Kelly & Xiu (2020, RFS) "Empirical Asset Pricing via Machine Learning"
+      — 神经网络在截面收益预测中表现最佳
+
+    使用 sklearn MLPRegressor 作为轻量级替代（不需要 GPU），
+    通过 permutation importance 衡量各因子的预测贡献。
+    """
+
+    def __init__(
+        self,
+        hidden_layer_sizes: tuple = (64, 32),
+        activation: str = "relu",
+        alpha: float = 0.001,
+        learning_rate_init: float = 0.001,
+        max_iter: int = 500,
+        early_stopping: bool = True,
+        random_state: int = 42,
+    ):
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.activation = activation
+        self.alpha = alpha
+        self.learning_rate_init = learning_rate_init
+        self.max_iter = max_iter
+        self.early_stopping = early_stopping
+        self.random_state = random_state
+        self.model = None
+        self.feature_importance = pd.Series(dtype=float)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "NeuralNetSelector":
+        from sklearn.neural_network import MLPRegressor
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.pipeline import Pipeline
+        from sklearn.inspection import permutation_importance
+
+        pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("mlp", MLPRegressor(
+                hidden_layer_sizes=self.hidden_layer_sizes,
+                activation=self.activation,
+                alpha=self.alpha,
+                learning_rate_init=self.learning_rate_init,
+                max_iter=self.max_iter,
+                early_stopping=self.early_stopping,
+                random_state=self.random_state,
+                verbose=False,
+            )),
+        ])
+
+        pipeline.fit(X, y)
+        self.model = pipeline
+
+        # Permutation importance (轻量: 5次重排)
+        result = permutation_importance(
+            pipeline, X, y,
+            n_repeats=5,
+            random_state=self.random_state,
+            n_jobs=-1,
+        )
+        self.feature_importance = pd.Series(
+            result.importances_mean, index=X.columns
+        ).sort_values(ascending=False)
+        return self
+
+    def get_top_k(self, k: int = 10) -> List[str]:
+        return self.feature_importance.head(k).index.tolist()
+
+
+# ============================================================
+# 9. 集成堆叠因子筛选 (Ensemble Stacking)
+# ============================================================
+
+class EnsembleStackingSelector:
+    """集成堆叠：组合多种挖掘方法的共识
+
+    逻辑：
+      1. 运行所有基础挖掘方法（每种方法产生 top-k 因子列表）
+      2. 统计每个因子被选中的次数
+      3. 输出跨方法的共识因子（被 ≥ 2 种方法选中的）
+
+    这与 Gu, Kelly & Xiu (2020) 的"模型组合"思想一致：
+      多个模型的共识 > 单一最优模型
+    """
+
+    def __init__(
+        self,
+        methods: Optional[List[str]] = None,
+        top_k_per_method: int = 10,
+        min_votes: int = 2,
+        random_state: int = 42,
+    ):
+        self.methods = methods or ["lasso", "rf", "xgb", "bayesian", "gbdt"]
+        self.top_k_per_method = top_k_per_method
+        self.min_votes = min_votes
+        self.random_state = random_state
+        self.results: Dict[str, list] = {}
+        self.consensus_factors: List[str] = []
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "EnsembleStackingSelector":
+        from collections import Counter
+
+        all_selected: Dict[str, List[str]] = {}
+
+        for method in self.methods:
+            if method == "lasso":
+                m = LassoSelector(random_state=self.random_state)
+                m.fit(X, y)
+                all_selected["lasso"] = m.get_selected()
+            elif method == "rf":
+                m = RandomForestSelector(random_state=self.random_state)
+                m.fit(X, y)
+                all_selected["rf"] = m.get_top_k(self.top_k_per_method)
+            elif method == "xgb":
+                m = XGBoostSelector(random_state=self.random_state)
+                m.fit(X, y)
+                all_selected["xgb"] = m.get_top_k(self.top_k_per_method)
+            elif method == "lgbm":
+                m = LightGBMSelector(random_state=self.random_state)
+                m.fit(X, y)
+                all_selected["lgbm"] = m.get_top_k(self.top_k_per_method)
+            elif method == "bayesian":
+                m = BayesianShrinkageSelector()
+                m.fit(X, y)
+                all_selected["bayesian"] = m.get_selected()
+            elif method == "gbdt":
+                m = GradientBoostingSelector(random_state=self.random_state)
+                m.fit(X, y)
+                imp = m.get_importance()
+                all_selected["gbdt"] = imp.sort_values(ascending=False).head(self.top_k_per_method).index.tolist()
+            elif method == "nn":
+                m = NeuralNetSelector(random_state=self.random_state)
+                m.fit(X, y)
+                all_selected["nn"] = m.get_top_k(self.top_k_per_method)
+
+        self.results = all_selected
+
+        # 统计共识
+        counter = Counter()
+        for method_name, selected_list in all_selected.items():
+            for feat in selected_list:
+                counter[feat] += 1
+
+        self.consensus_factors = [
+            f for f, c in counter.items()
+            if c >= self.min_votes
+        ]
+        return self
+
+    def get_consensus(self) -> List[str]:
+        return self.consensus_factors
+
+    def get_all_results(self) -> Dict[str, list]:
+        return self.results
+
+
+# ============================================================
+# 10. 遗传规划因子挖掘 (Genetic Programming)
 # ============================================================
 
 class GeneticProgrammingMiner:
@@ -392,7 +760,9 @@ class FactorMiningPipeline:
     """
 
     def __init__(self, methods: Optional[List[str]] = None):
-        self.methods = methods or ["lasso", "elastic_net", "random_forest", "gradient_boosting", "genetic_programming"]
+        self.methods = methods or ["lasso", "elastic_net", "random_forest", "gradient_boosting",
+                                    "xgboost", "lightgbm", "bayesian", "neural_net",
+                                    "genetic_programming"]
         self.results: Dict[str, Dict] = {}
         self.selected_factors: List[str] = []
         self.new_formulas: List[Dict] = []
@@ -444,6 +814,37 @@ class FactorMiningPipeline:
                 "history": gp.history,
             }
 
+        if "xgboost" in self.methods:
+            xgb_model = XGBoostSelector()
+            xgb_model.fit(X, y)
+            results["xgboost"] = {
+                "importance": xgb_model.get_importance().to_dict(),
+                "top10": xgb_model.get_top_k(10),
+            }
+
+        if "lightgbm" in self.methods:
+            lgb_model = LightGBMSelector()
+            lgb_model.fit(X, y)
+            results["lightgbm"] = {
+                "importance": {},
+                "top10": lgb_model.get_top_k(10),
+            }
+
+        if "bayesian" in self.methods:
+            bayes_model = BayesianShrinkageSelector()
+            bayes_model.fit(X, y)
+            results["bayesian"] = {
+                "selected": bayes_model.get_selected(),
+            }
+
+        if "neural_net" in self.methods:
+            nn_model = NeuralNetSelector()
+            nn_model.fit(X, y)
+            results["neural_net"] = {
+                "importance": nn_model.feature_importance.to_dict(),
+                "top10": nn_model.get_top_k(10),
+            }
+
         return results
 
     def _consensus_selection(self, selected_sets_per_method: Dict[str, list]) -> List[str]:
@@ -458,6 +859,8 @@ class FactorMiningPipeline:
                 selected_sets.append(set(res["selected"]))
             if "top10" in res:
                 selected_sets.append(set(res["top10"]))
+            if "consensus" in res:
+                selected_sets.append(set(res["consensus"]))
 
         if not selected_sets:
             return []

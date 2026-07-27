@@ -22,7 +22,7 @@ def sample_data():
     np.random.seed(42)
     n = 1000
     dates = pd.date_range("2023-01-01", periods=100, freq="D")
-    stocks = [f"S{i:04d}" for i in range(10)]
+    stocks = [f"S{i:04d}" for i in range(50)]
 
     records = []
     for date in dates:
