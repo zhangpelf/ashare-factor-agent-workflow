@@ -95,10 +95,10 @@ def load_yfinance(start_date: str, end_date: str) -> pd.DataFrame:
 
 
 # ============================================================
-# 主流程
+# 命令行参数与 DSL Harness 装配
 # ============================================================
 
-def main():
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A 股因子挖掘流水线")
     parser.add_argument("--source", choices=["akshare", "yfinance"], default="akshare",
                         help="数据源 (默认 akshare)")
@@ -108,7 +108,98 @@ def main():
                         help="起始日期 (默认 2024-06-01)")
     parser.add_argument("--end", default="2025-05-30",
                         help="截止日期 (默认 2025-05-30)")
-    args = parser.parse_args()
+    parser.add_argument("--validate-dsl", action="store_true",
+                        help="用 DSL 求值器验证 GP 最佳公式 (默认关闭)")
+    parser.add_argument("--cache-enable", action="store_true",
+                        help="启用四层缓存 (默认关闭)")
+    parser.add_argument("--cache-dir", type=Path,
+                        help="缓存目录 (默认 .cache/quant_factor_harness)")
+    parser.add_argument("--memory-enable", action="store_true",
+                        help="启用研究记忆 (默认关闭)")
+    parser.add_argument("--memory-db", type=Path,
+                        help="研究记忆 SQLite 路径 (默认 <cache-dir>/research_memory.db)")
+    return parser.parse_args(argv)
+
+
+def _build_harness(args: argparse.Namespace, stock_ids: list[str], fields: list[str]):
+    """按参数构建 PipelineHarness；路径缺省时回落到项目本地 .cache 目录。"""
+    from integration import PipelineHarness, build_run_identity
+
+    project_root = Path(__file__).resolve().parent.parent
+    default_dir = project_root / ".cache" / "quant_factor_harness"
+    cache_dir = args.cache_dir if args.cache_dir is not None else default_dir
+    memory_db = args.memory_db if args.memory_db is not None else cache_dir / "research_memory.db"
+    identity = build_run_identity(args.source, args.stocks, args.start, args.end, stock_ids, fields)
+    return PipelineHarness(cache_dir, memory_db, identity,
+                           enable_cache=args.cache_enable,
+                           enable_memory=args.memory_enable)
+
+
+def _cache_builtin_panel(harness, factor_df: pd.DataFrame, price_cols: list[str]) -> None:
+    """把内置因子数值面板写入 Layer 1；任何缓存失败只告警，不中断流水线。"""
+    if not harness.enable_cache:
+        return
+    try:
+        for col in price_cols:
+            matrix = factor_df.pivot_table(index="date", columns="stock_id", values=col)
+            harness.store_data_matrix(col, matrix)
+    except Exception as e:  # noqa: BLE001 — fail-open
+        logger.warning("内置面板缓存失败 (fail-open): %s", e)
+
+
+def _evaluate_dsl_candidate(harness, tp, factor_df: pd.DataFrame, best_formula: str,
+                            feature_names: list[str]) -> None:
+    """用 DSL 求值器验证 GP 最佳公式；评估成功才持久化 Layer 4 与研究记忆。"""
+    try:
+        from dsl_compiler import FactorDSLCompiler
+        from dsl_evaluator import CrossSectionDSLEvaluator
+        from gp_translator import translate_gp_formula
+        from utils import winsorize as winsorize_util
+
+        translated = translate_gp_formula(best_formula, feature_names)
+        if not translated.success:
+            logger.warning("DSL 翻译失败 (%s): %s", translated.error_type, translated.error_message)
+            return
+        compiled = FactorDSLCompiler(set(feature_names)).parse_and_compile(translated.expression)
+        if not compiled["success"]:
+            logger.warning("DSL 编译失败: %s", compiled.get("error_message"))
+            return
+        matrix = CrossSectionDSLEvaluator().evaluate_panel(compiled["ast_root"], factor_df)
+        raw = matrix.stack(dropna=False)
+        raw.name = "dsl_raw"
+        merged = factor_df[["date", "stock_id", "forward_1d_ret"]].merge(
+            raw.reset_index(), on=["date", "stock_id"], how="left")
+        merged["dsl_factor_z"] = merged.groupby("date")["dsl_raw"].transform(
+            lambda x: (
+                (winsorize_util(x) - winsorize_util(x).mean())
+                / (winsorize_util(x).std() + 1e-10)
+            )
+        )
+        r = tp.test_factor(merged, "dsl_factor_z", ret_col="forward_1d_ret", n_groups=5)
+        metrics = {
+            "mean_ic": float(r.mean_ic),
+            "ir": float(r.ir),
+            "sharpe": float(r.sharpe),
+            "fm_tstat": float(r.fama_macbeth_tstat),
+            "long_short_annualized": float(r.long_short_annual_ret),
+        }
+        harness.store_evaluation_metrics("dsl_factor", compiled["ast_hash"], metrics)
+        harness.record_candidate(compiled["ast_hash"], best_formula,
+                                 compiled["canonical_expression"], 0, list(feature_names))
+        harness.record_evaluation(compiled["ast_hash"], metrics, "PASSED")
+        print(f"  DSL验证 {best_formula} → IC={r.mean_ic:.4f}  IR={r.ir:.4f}  "
+              f"LS={r.long_short_annual_ret:.4f}  Sharpe={r.sharpe:.4f}  "
+              f"hash={compiled['ast_hash'][:8]}")
+    except Exception as e:  # noqa: BLE001 — fail-open
+        logger.warning("DSL 验证跳过 (fail-open): %s", e)
+
+
+# ============================================================
+# 主流程
+# ============================================================
+
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
 
     print("=" * 65)
     print(f"A股因子挖掘流水线 — 数据源: {args.source}")
@@ -162,6 +253,11 @@ def main():
             )
         )
 
+    harness = None
+    if args.validate_dsl or args.cache_enable or args.memory_enable:
+        harness = _build_harness(args, sorted(df['stock_id'].unique().tolist()), price_cols)
+        _cache_builtin_panel(harness, factor_df, price_cols)
+
     # --------------------------------------------------------
     # Step 3: 因子挖掘
     # --------------------------------------------------------
@@ -185,11 +281,15 @@ def main():
             print(f"    {r['method']:20s}: {r['n_selected']:3d} selected{formula}")
 
         selected = set()
+        best_formula = None
         for method, res in pipeline.results.items():
             if 'selected' in res:
                 selected.update(res['selected'])
             if 'top10' in res:
                 selected.update(res['top10'])
+        gp_res = pipeline.results.get("genetic_programming") or {}
+        if isinstance(gp_res, dict) and gp_res.get("best_formula"):
+            best_formula = gp_res["best_formula"]
         test_factors = list(selected)[:15] or price_cols[:8]
     else:
         test_factors = price_cols[:5]
@@ -219,6 +319,9 @@ def main():
                   f"LS={r.long_short_annual_ret:.4f}  Sharpe={r.sharpe:.4f}")
         except Exception as e:
             print(f"  {f:20s} SKIP ({e})")
+
+    if harness is not None and args.validate_dsl and best_formula:
+        _evaluate_dsl_candidate(harness, tp, factor_df, best_formula, price_cols)
 
     # --------------------------------------------------------
     # Step 5: 因子相关性
