@@ -10,7 +10,7 @@ error context generation for LLM Agent integration.
 import ast
 import json
 import hashlib
-from typing import Dict, List, Set, Tuple, Any, Optional
+from typing import Any, Collection, Dict, List, Optional, Set, Tuple
 
 # Registered fields
 REGISTERED_FIELDS = {
@@ -41,6 +41,12 @@ REGISTERED_OPERATORS = {
     "log": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
     "abs": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
     "sign": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
+    "sqrt_abs": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
+    "log_abs": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
+    "square": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
+    "neg": {"type": "elementwise", "min_args": 1, "max_args": 1, "lookback_arg_idx": None},
+    "max": {"type": "elementwise", "min_args": 2, "max_args": 2, "lookback_arg_idx": None},
+    "min": {"type": "elementwise", "min_args": 2, "max_args": 2, "lookback_arg_idx": None},
 }
 
 
@@ -79,9 +85,9 @@ class FactorDSLCompiler:
     extracts dependencies, and optimizes AST for intermediate node reuse (CSE).
     """
     
-    def __init__(self):
+    def __init__(self, registered_fields: Collection[str] | None = None):
         self.registered_operators = REGISTERED_OPERATORS
-        self.registered_fields = REGISTERED_FIELDS
+        self.registered_fields = set(registered_fields or REGISTERED_FIELDS)
 
     def parse_and_compile(self, expression: str) -> Dict[str, Any]:
         """

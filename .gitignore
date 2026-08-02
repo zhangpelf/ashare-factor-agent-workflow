@@ -37,3 +37,6 @@ review-stage/
 # Research artifacts
 research-wiki/
 research/
+
+# Runtime harness cache
+.cache/
