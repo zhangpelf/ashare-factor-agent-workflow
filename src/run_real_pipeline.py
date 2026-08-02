@@ -120,6 +120,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="启用研究记忆 (默认关闭)")
     parser.add_argument("--memory-db", type=Path,
                         help="研究记忆 SQLite 路径 (默认 <cache-dir>/research_memory.db)")
+    parser.add_argument("--portfolio", action="store_true",
+                        help="启用组合优化回测：检验后的因子合成组合并回测 (默认关闭)")
+    parser.add_argument("--top-n", type=int, default=10,
+                        help="组合选股数量 (默认 10)")
+    parser.add_argument("--rebalance", choices=["daily", "weekly"], default="weekly",
+                        help="组合调仓频率 (默认 weekly)")
+    parser.add_argument("--tcost-bps", type=float, default=10.0,
+                        help="组合双边交易成本 (基点，默认 10 = 0.1%%)")
     return parser.parse_args(argv)
 
 
@@ -326,6 +334,52 @@ def main(argv: list[str] | None = None):
         _evaluate_dsl_candidate(harness, tp, factor_df, best_formula, price_cols)
 
     # --------------------------------------------------------
+    # Step 4.5: 组合优化回测（可选 --portfolio）
+    # --------------------------------------------------------
+    out_dir = Path(__file__).resolve().parent.parent / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.portfolio:
+        print("\n[4.5/6] 组合优化回测 (合成因子 → 选股 → 扣成本回测)...")
+        try:
+            from portfolio import combine_factors, backtest_portfolio
+
+            # 用通过检验的因子（非零 IC）合成综合得分
+            valid_factors = [f for f in test_factors
+                             if f + '_z' in factor_df.columns]
+            if not valid_factors:
+                print("  无可用因子，跳过组合回测")
+            else:
+                combo = combine_factors(factor_df, [f + '_z' for f in valid_factors])
+                combo_result = backtest_portfolio(
+                    combo,
+                    factor_col="combined_score",
+                    ret_col="forward_1d_ret",
+                    top_n=args.top_n,
+                    rebalance=args.rebalance,
+                    tcost_bps=args.tcost_bps,
+                )
+                m = combo_result["metrics"]
+                nav = combo_result["nav"]
+                bench_nav = combo_result["benchmark_nav"]
+                print(f"  组合净值 (Top-{args.top_n}, {args.rebalance}, "
+                      f"成本{args.tcost_bps:.0f}bps):")
+                print(f"    期末净值: {nav.iloc[-1]:.4f} (基准: {bench_nav.iloc[-1]:.4f})")
+                print(f"    年化收益: {m['annual_return']*100:.2f}%   "
+                      f"Sharpe: {m['sharpe']:.2f}   "
+                      f"最大回撤: {m['max_drawdown']*100:.2f}%")
+                if nav.iloc[-1] > bench_nav.iloc[-1]:
+                    print(f"  ✅ 组合跑赢基准 (+{(nav.iloc[-1]/bench_nav.iloc[-1]-1)*100:.1f}%)")
+                else:
+                    print(f"  ❌ 组合跑输基准 ({(nav.iloc[-1]/bench_nav.iloc[-1]-1)*100:.1f}%)")
+                # 输出净值序列供报告使用
+                portfolio_out = out_dir / "portfolio_nav.csv"
+                pd.DataFrame({"portfolio": nav, "benchmark": bench_nav}).to_csv(portfolio_out)
+                print(f"  净值曲线 → {portfolio_out}")
+        except Exception as e:  # noqa: BLE001 — fail-open
+            print(f"  组合回测失败 (fail-open): {e}")
+
+    # --------------------------------------------------------
     # Step 5: 因子相关性
     # --------------------------------------------------------
     print("\n[5/6] 因子相关性分析...")
@@ -347,9 +401,6 @@ def main(argv: list[str] | None = None):
     summary = tp.summary_df()
     if len(summary) > 0:
         print(summary.round(4).to_string(index=False))
-
-    out_dir = Path(__file__).resolve().parent.parent / "output"
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     report_path = out_dir / "ashare_factor_report.csv"
     summary.to_csv(report_path, index=False)
