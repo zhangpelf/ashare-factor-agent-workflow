@@ -30,11 +30,11 @@ logger = logging.getLogger(__name__)
 # 数据源加载
 # ============================================================
 
-def load_akshare(start_date: str, end_date: str, max_stocks: int) -> pd.DataFrame:
+def load_akshare(start_date: str, end_date: str, max_stocks: int, with_financials: bool = False) -> pd.DataFrame:
     """通过 akshare（新浪财经）加载 A 股数据"""
     from akshare_data import AShareData
     ds = AShareData()
-    df = ds.build_factor_df(start_date, end_date, max_stocks, with_financials=False)
+    df = ds.build_factor_df(start_date, end_date, max_stocks, with_financials=with_financials)
     # 注意: with_financials=False 仅量价因子; 东方财富API不稳定时跳过财务数据
     # 重命名 stock_id 去掉前缀以兼容因子函数
     return df
@@ -104,6 +104,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="数据源 (默认 akshare)")
     parser.add_argument("--stocks", type=int, default=60,
                         help="股票数量 (akshare 模式，按代码排序取前 N 只)")
+    parser.add_argument("--with-financials", action="store_true",
+                        help="拉取基本面财务数据 (默认关闭，东财 API 可能不稳定)")
     parser.add_argument("--start", default="2024-06-01",
                         help="起始日期 (默认 2024-06-01)")
     parser.add_argument("--end", default="2025-05-30",
@@ -210,7 +212,7 @@ def main(argv: list[str] | None = None):
     # --------------------------------------------------------
     print(f"\n[1/6] 加载数据 [{args.source}] ...")
     if args.source == "akshare":
-        df = load_akshare(args.start, args.end, args.stocks)
+        df = load_akshare(args.start, args.end, args.stocks, args.with_financials)
     else:
         df = load_yfinance(args.start, args.end)
 

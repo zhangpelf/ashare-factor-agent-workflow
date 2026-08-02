@@ -127,8 +127,18 @@ def test_parse_args_defaults_leave_harness_disabled() -> None:
     assert not args.validate_dsl
     assert not args.cache_enable
     assert not args.memory_enable
+    assert not args.with_financials
     assert args.source == "akshare"
     assert args.stocks == 60
+
+
+def test_parse_args_enables_financials_flag() -> None:
+    from src.run_real_pipeline import parse_args
+
+    args = parse_args(["--with-financials", "--stocks", "100"])
+
+    assert args.with_financials
+    assert args.stocks == 100
 
 
 def test_parse_args_accepts_local_harness_paths(tmp_path) -> None:
