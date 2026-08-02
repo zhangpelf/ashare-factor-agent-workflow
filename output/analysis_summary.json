@@ -1,10 +1,12 @@
 {
-  "n_factors": 8,
-  "valid_ic": 6,
-  "valid_sharpe": 4,
-  "valid_fm": 0,
-  "valid_overall": 3,
+  "n_factors": 11,
+  "valid_ic": 11,
+  "valid_sharpe": 6,
+  "valid_fm": 2,
+  "valid_overall": 6,
   "best_factor": "beta_z",
-  "best_sharpe": 1.9144,
-  "quality": "高"
+  "best_sharpe": -0.149,
+  "quality": "高",
+  "stable_ic_direction": 1,
+  "unstable_ic_direction": 10
 }

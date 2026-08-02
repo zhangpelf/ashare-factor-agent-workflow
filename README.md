@@ -19,18 +19,21 @@ Key capabilities include:
 - **Daily IC/IR & Group Backtesting**: Spearman rank correlation, quintile portfolios, Fama-MacBeth regression with Newey-West standard errors.
 - **24 Publication-Quality Figures & HTML Reports**: Automated PDF vector chart rendering and ARIS cross-model review loop.
 
-### Key Results (A-Share Stocks, 73 Tickers)
+### Key Results (A-Share Stocks, 30 Tickers, AkShare + Fundamentals)
 
-| Factor | Mean IC | IR | Sharpe | FM t-stat | Verdict |
-|--------|---------|----|--------|-----------|---------|
-| beta_z | 0.0132 | 0.38 | 1.91 | 2.12 | ✅ Effective |
-| momentum_6m_z | 0.0106 | 0.29 | 1.47 | 1.74 | ❓ Moderate |
-| dollar_volume_z | 0.0081 | 0.24 | 1.25 | 1.56 | ❓ Moderate |
-| st_reversal_1m_z | -0.0073 | -0.20 | -1.08 | -1.45 | ❓ Moderate |
-| amihud_illiq_z | 0.0068 | 0.20 | 1.02 | 1.30 | ❓ Moderate |
-| size_z | -0.0062 | -0.18 | -0.95 | -1.21 | ❓ Moderate |
-| max_ret_1m_z | 0.0051 | 0.15 | 0.78 | 1.05 | ❌ Weak |
-| ivol_capm_z | -0.0038 | -0.11 | -0.62 | -0.88 | ❌ Weak |
+| Factor | Mean IC | IR | IC Pos Ratio | LS Annual | Sharpe | FM t-stat | Verdict |
+|--------|---------|----|--------------|-----------|--------|-----------|---------|
+| beta_z | 0.0279 | 0.16 | 56.0% | -3.2% | -0.15 | 0.35 | ✅ Positive IC |
+| cvar_95_z | 0.0279 | 0.09 | 50.0% | -5.3% | -0.16 | -0.16 | ✅ Positive IC |
+| var_95_z | 0.0171 | 0.05 | 48.2% | -10.5% | -0.31 | -0.28 | ✅ Positive IC |
+| size_z | -0.0153 | -0.06 | 49.8% | -52.6% | -1.81 | -2.16 | ❓ Negative IC |
+| dsl_factor_z | -0.0153 | -0.06 | 49.8% | -52.6% | -1.81 | -2.16 | ❓ GP-DSL eval |
+| cokurtosis_z | -0.0190 | -0.09 | 46.4% | -4.0% | -0.18 | -0.49 | ❓ Negative IC |
+| coskewness_z | -0.0221 | -0.09 | 42.9% | -33.9% | -1.26 | -1.58 | ❓ Negative IC |
+| ulcer_index_z | -0.0216 | -0.11 | 44.4% | -15.7% | -0.72 | -0.80 | ❓ Negative IC |
+| ivol_capm_z | -0.0529 | -0.16 | 45.9% | -26.2% | -0.79 | -0.81 | ❌ Weak |
+| max_ret_1m_z | -0.0471 | -0.19 | 42.7% | +4.6% | +0.16 | -0.23 | ❌ Weak |
+| st_reversal_1m_z | -0.0537 | -0.21 | 47.1% | -28.1% | -0.88 | -0.74 | ❌ Weak |
 
 ## System Architecture
 
@@ -95,7 +98,7 @@ graph TD
 
 ```bash
 # Python 3.11+ with dependencies
-pip install pandas numpy scipy matplotlib seaborn statsmodels scikit-learn yfinance
+pip install pandas numpy scipy matplotlib seaborn statsmodels scikit-learn akshare
 ```
 
 ### Run Full Pipeline
@@ -127,8 +130,8 @@ python3 -m src.workflow_orchestrator --mode analyze
 
 ### Data Flow
 
-1. **Data Loading**: yfinance → daily OHLCV for A-share constituents
-2. **Factor Computation**: 8 classic factors computed daily
+1. **Data Loading**: akshare → daily OHLCV + fundamentals for A-share constituents
+2. **Factor Computation**: price-volume + fundamental factors computed daily
 3. **IC Analysis**: Daily cross-sectional Spearman correlation
 4. **Group Backtesting**: Equally-weighted quintile portfolios
 5. **Fama-MacBeth Regression**: Cross-sectional regression with Newey-West s.e.
@@ -174,8 +177,8 @@ output/
 └── analysis_summary.json       # Analysis results
 
 figures/
-├── ic_series_*.pdf             # IC time series (8 factors)
-├── cumulative_*.pdf            # Cumulative returns (8 factors)
+├── ic_series_*.pdf             # IC time series (per factor)
+├── cumulative_*.pdf            # Cumulative returns (per factor)
 ├── distribution_*.pdf          # Factor distributions
 ├── factor_correlation_heatmap.pdf  # Correlation matrix
 └── factor_dashboard.png        # Performance dashboard
@@ -204,7 +207,7 @@ MIT
 
 - This project references skills and workflows from the **ARIS (Adversarial Research Improvement System)** methodology, particularly the `auto-review-loop` for cross-model adversarial review between Claude and GPT.
 - Factor testing methodology inspired by Cochrane's *Asset Pricing* (2005) and the growing "factor zoo" literature.
-- A-share market data sourced via yfinance with CSI 300 index constituents.
+- A-share market data sourced via akshare (Sina quotes + EastMoney fundamentals).
 
 ---
 
