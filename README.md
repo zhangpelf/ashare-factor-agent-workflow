@@ -35,6 +35,22 @@ Key capabilities include:
 | max_ret_1m_z | -0.0471 | -0.19 | 42.7% | +4.6% | +0.16 | -0.23 | ❌ Weak |
 | st_reversal_1m_z | -0.0537 | -0.21 | 47.1% | -28.1% | -0.88 | -0.74 | ❌ Weak |
 
+### Portfolio Backtest (30 Tickers, weekly rebalance, 10bps cost)
+
+| Metric | Portfolio (Top-10) | Benchmark (Equal-weight) |
+|--------|--------------------|--------------------------|
+| Final NAV | 0.9485 | 0.9955 |
+| Annual Return | -10.43% | -0.45% |
+| Sharpe | -0.43 | — |
+| Max Drawdown | -18.51% | — |
+
+> ⚠️ The naive equal-weighted composite of all validated factors underperforms the
+> benchmark. This is the honest first-pass result: most factors in the pool carry
+> negative IC and are not direction-reversed, so they drag the portfolio down.
+> The `direction` and `ic_weights` options in `src/portfolio.py` support factor
+> filtering/reversal for the next iteration — this mirrors real quant practice
+> where factors must be screened and sign-aligned before entering a portfolio.
+
 ## System Architecture
 
 ```mermaid
@@ -107,6 +123,19 @@ pip install pandas numpy scipy matplotlib seaborn statsmodels scikit-learn aksha
 # Run the complete workflow
 python3 -m src.workflow_orchestrator --mode full --real-data
 ```
+
+### Run Pipeline with Portfolio Optimization
+
+```bash
+# Run factor mining + portfolio backtest (Top-10 weekly, 10bps cost)
+python3 src/run_real_pipeline.py --source akshare --stocks 30 --with-financials \
+  --validate-dsl --cache-enable --memory-enable \
+  --portfolio --top-n 10 --rebalance weekly --tcost-bps 10
+```
+
+The `--portfolio` step combines validated factors into a composite score, selects
+the top-N stocks, and backtests the portfolio net of transaction costs against an
+equal-weight benchmark. Output: `output/portfolio_nav.csv`.
 
 ### Generate Figures (24 charts)
 
