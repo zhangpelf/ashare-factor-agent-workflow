@@ -1,21 +1,23 @@
-# A-Share Factor Mining & Workflow System
+# A 股量化因子挖掘与 Agent 工作流引擎
 
-> Automated quantitative factor mining, testing, and reporting pipeline for China A-share market — with ARIS adversarial review loop.
+> High-throughput quantitative factor mining, restricted DSL AST compiler, 4-layer caching, and automated testing pipeline for China A-share market — featuring decoupled AI Agent harness & ARIS cross-model adversarial review.
 
 ![Uploading factor_report.png…]()
 
-
 ## Overview
 
-This project provides a complete workflow for quantitative factor research on China A-shares, from literature survey to final report. It includes:
+This project provides a **quantitative factor research architecture** for China A-shares. Instead of letting LLMs write raw, unconstrained Python scripts that suffer from lookahead bias (future leakage) and un-reproducible rules, this system **decouples LLM hypothesis generation from a deterministic execution core (Harness)**.
 
-- **8 classic factors** implementation (beta, momentum, size, liquidity, volatility, etc.)
-- **Daily IC/IR analysis** with Spearman rank correlation
-- **Quintile portfolio backtesting** with long-short performance
-- **Fama-MacBeth regression** with Newey-West standard errors
-- **24 publication-quality charts** (PDF vector format)
-- **Professional HTML report** with KPIs, tables, and embedded figures
-- **ARIS adversarial review loop** (cross-model critique: Claude ↔ GPT)
+Key capabilities include:
+
+- **Decoupled AI Agent Harness Architecture**: LLM generates hypotheses and select operators; deterministic core executes PIT-aligned data calculations and backtests.
+- **Restricted Expression DSL & AST Compiler**: High-performance parser (e.g. `cs_zscore(ts_return(close, 5))`) with static dependency checks, lookback window inference, and intermediate node deduping.
+- **Columnar Storage & Matrix Compute Engine**: Parquet column-store + memory-mapped `date × sid` Float32 matrices using Polars, DuckDB, NumPy, and Cython.
+- **4-Layer Persistent Cache System**: Data Matrix Cache, AST Intermediate Node Cache, Factor Matrix Cache, and Evaluation Cache with hash fingerprinting and incremental rollback logic.
+- **Persistent Research Memory**: SQLite-backed knowledge base tracking candidate lifecycle, IC/IR, turnover, cross-factor correlation, and failed variant lineages.
+- **8 Classic & 43 Extended Factor Families**: Beta, momentum, size, liquidity, volatility, quality, growth, CH-4, and q-factor models.
+- **Daily IC/IR & Group Backtesting**: Spearman rank correlation, quintile portfolios, Fama-MacBeth regression with Newey-West standard errors.
+- **24 Publication-Quality Figures & HTML Reports**: Automated PDF vector chart rendering and ARIS cross-model review loop.
 
 ### Key Results (A-Share Stocks, 73 Tickers)
 
@@ -30,7 +32,24 @@ This project provides a complete workflow for quantitative factor research on Ch
 | max_ret_1m_z | 0.0051 | 0.15 | 0.78 | 1.05 | ❌ Weak |
 | ivol_capm_z | -0.0038 | -0.11 | -0.62 | -0.88 | ❌ Weak |
 
-## Architecture
+## System Architecture
+
+```mermaid
+graph TD
+    A[Research Agent / LLM] -->|1. Generate Hypothesis & Restricted DSL| B[Tool Layer / DSL Compiler]
+    B -->|2. AST Validation & Dep Extraction & Node Dedup| C[Research Core / Deterministic Harness]
+    
+    subgraph Research Core [Deterministic Engine]
+        C1[Data Catalog / Parquet + date×sid Matrix] --> C2[Operator Engine / Cython + NumPy]
+        C2 --> C3[4-Layer Cache System]
+        C3 --> C4[Standardized Evaluation Protocol]
+    end
+    
+    C4 -->|3. Structured Metrics & Error Context| A
+    C4 -->|4. Store Full Candidate Lifecycle| D[(Research Memory / SQLite)]
+```
+
+### 🔄 Multi-Stage Pipeline Flow
 
 ```
                          ┌──────────────────────────┐
@@ -38,7 +57,7 @@ This project provides a complete workflow for quantitative factor research on Ch
                          └───────────┬──────────────┘
                                      ▼
                          ┌──────────────────────────┐
-                         │   G002: Factor Mining      │
+                         │   G002: DSL Factor Mining │
                          └───────────┬──────────────┘
                                      ▼
                          ┌──────────────────────────┐
