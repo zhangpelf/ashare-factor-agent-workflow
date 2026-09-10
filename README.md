@@ -2,7 +2,7 @@
 
 > High-throughput quantitative factor mining, restricted DSL AST compiler, 4-layer caching, and automated testing pipeline for China A-share market — featuring decoupled AI Agent harness & ARIS cross-model adversarial review.
 
-![Uploading factor_report.png…]()
+![Factor Dashboard](figures/factor_dashboard.png)
 
 ## Overview
 
@@ -16,8 +16,11 @@ Key capabilities include:
 - **4-Layer Persistent Cache System**: Data Matrix Cache, AST Intermediate Node Cache, Factor Matrix Cache, and Evaluation Cache with hash fingerprinting and incremental rollback logic.
 - **Persistent Research Memory**: SQLite-backed knowledge base tracking candidate lifecycle, IC/IR, turnover, cross-factor correlation, and failed variant lineages.
 - **8 Classic & 43 Extended Factor Families**: Beta, momentum, size, liquidity, volatility, quality, growth, CH-4, and q-factor models.
+- **Index Reinforcement Learning (RL) Constituent Selection**: Train RL policy agents to dynamically allocate/select index constituents and analyze policy stability.
+- **End-to-End Traced Pipeline**: Performance profiling and execution tracing with `./run_traced.sh`.
+- **Alternative Alpha**: Experimental Polymarket prediction sentiment factor extraction (`src/polymarket_factors.py`).
 - **Daily IC/IR & Group Backtesting**: Spearman rank correlation, quintile portfolios, Fama-MacBeth regression with Newey-West standard errors.
-- **24 Publication-Quality Figures & HTML Reports**: Automated PDF vector chart rendering and ARIS cross-model review loop.
+- **24+ Publication-Quality Figures & HTML Reports**: Automated PDF vector chart rendering and ARIS cross-model review loop.
 
 ### Key Results (A-Share Stocks, 30 Tickers, AkShare + Fundamentals)
 
@@ -155,6 +158,24 @@ python3 -m src.workflow_orchestrator --mode report
 python3 -m src.workflow_orchestrator --mode analyze
 ```
 
+### Run Index RL Training & Policy Analysis
+
+```bash
+# Train RL policy for index constituent selection
+python3 src/index_rl_pipeline.py
+
+# Evaluate and analyze trained RL policy metrics
+python3 src/analyze_rl_policy.py
+```
+
+### Run End-to-End Traced Pipeline
+
+```bash
+# Execute full pipeline with time-profiling and execution trace
+./run_traced.sh
+# or: python3 src/run_traced_pipeline.py
+```
+
 ## Pipeline Components
 
 ### Data Flow
@@ -164,8 +185,9 @@ python3 -m src.workflow_orchestrator --mode analyze
 3. **IC Analysis**: Daily cross-sectional Spearman correlation
 4. **Group Backtesting**: Equally-weighted quintile portfolios
 5. **Fama-MacBeth Regression**: Cross-sectional regression with Newey-West s.e.
-6. **Visualization**: 24 publication-quality charts (PDF)
-7. **HTML Report**: Professional report with KPIs and embedded figures
+6. **RL Policy Modeling**: Reinforcement learning constituent allocation & policy testing
+7. **Visualization**: 24+ publication-quality charts (PDF)
+8. **HTML Report**: Professional report with KPIs and embedded figures
 
 ### Factor Definitions
 
@@ -194,6 +216,7 @@ This repo handles the Python computation pipeline. The **Claude Code skills** th
 | `auto-因子图表` | 24 publication-quality figures |
 | `auto-因子报告` | Structured report generation (Markdown + Excel) |
 | `auto-撰写报告` | 8-module final report with decision gates |
+| `manual-指数RL训练` | RL training — reinforcement learning for index constituent selection |
 
 ## Output Structure
 
