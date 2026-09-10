@@ -1,111 +1,169 @@
 ---
 name: auto-因子分析
-description: 分析因子挖掘实验结果，生成对比表和洞见 — IC/IR 对比、方法对比、因子稳定性分析
+description: 因子实验结果分析 — 指标解读、绩效排名、IC方向判断、买入信号
 argument-hint: "[results-path-or-description]"
-allowed-tools: Bash(*), Read, Glob, Write, Edit, Agent
+allowed-tools: Bash(*), Read, Glob, Write
 ---
 
-# 因子实验结果分析
+# 因子分析
 
-分析因子挖掘和检验的实验结果，生成对比表和可执行洞见。
+分析因子挖掘和检验结果，生成带指标说明和可执行买入建议的综合报告。
 
-## 用途
+## 输出格式
 
-用于以下场景：
-- 对比不同因子挖掘方法（LASSO vs RF vs GP）的产出
-- 分析因子在时间上的稳定性（分段检验）
-- 对比不同参数配置下的因子表现
-- 生成因子性能排序和选因子建议
+标准输出为 `output/因子分析报告.md`，包含：
 
-## 工作流
+1. **指标说明** — IC/IR/Sharpe/FM t/多空年化/IC正比例 的含义和阈值
+2. **因子绩效总表** — 按显著性排序的所有因子检验结果
+3. **各因子详解** — 逐个分析每个因子表现
+4. **买入建议** — 基于显著因子的具体选股策略和买卖规则
 
-### Step 1: 收集实验结果
+## 指标定义
 
-```bash
-# CSV 报告
-summary_df = pd.read_csv("output/ashare_factor_report.csv")
+| 指标 | 公式 | 含义 | 阈值 |
+|------|------|------|------|
+| **IC** | rank(因子)与rank(收益)的相关系数 | 因子预测方向 | \|IC\|>0.01有意义，>0.03较强 |
+| **IR** | mean(IC)/std(IC) | 预测稳定性 | >0.3稳定，>0.5很稳定 |
+| **Sharpe** | 多空年化收益/年化波动 | 风险调整后收益 | >0.5可接受，>1.0优秀 |
+| **FM t** | Fama-MacBeth截面回归t值 | 统计显著性 | \|t\|>1.96显著(95%)，>2.58高度显著(99%) |
+| **多空年化** | 做多高组做空低组的年化收益 | 实际交易价值 | >5%有交易价值 |
+| **IC正比例** | IC>0的天数占比 | 方向一致性 | >55%方向稳定 |
 
-# 挖掘方法对比
-mining_logs = glob("output/mining_*.json")
-```
+## 因子方向判断
 
-### Step 2: 构建对比表
+| IC符号 | FM t显著 | 判断 |
+|--------|---------|------|
+| 正 | 是 | 因子值越高越好，做多高值组 |
+| 负 | 是 | 因子值越低越好，做多低值组 |
+| 正/负 | 否 | 方向不确定，不可靠 |
+| ≈0 | — | 无预测力 |
+
+## 买入建议逻辑
+
+基于显著因子的方向，给出具体选股策略：
+
+1. **选什么**：选择哪个因子（如 st_reversal_1w = 1周反转）
+2. **怎么选**：排序标准（如 st_reversal_1w 最低的 20%）
+3. **怎么买**：等权/市值加权，纯多头/多空
+4. **持有多久**：调仓频率（如每周）
+5. **何时卖**：止盈止损规则
+6. **风险提示**：策略失效条件
+
+## 典型分析流程
 
 ```python
-import pandas as pd
-
-# 因子绩效排名
-summary = pd.read_csv("output/ashare_factor_report.csv")
-summary = summary.sort_values("Sharpe", ascending=False)
-
-print("=== 因子 Sharpe 排名 ===")
-print(summary[["因子", "Mean_IC", "IR", "Sharpe", "FM_tstat"]].round(4).to_string())
-
-print("\n=== 因子 IC 排名 ===")
-ic_ranked = summary.sort_values("Mean_IC", ascending=False)
-print(ic_ranked[["因子", "Mean_IC", "IR"]].round(4).to_string())
-```
-
-### Step 3: 分段稳定性分析
-
-```python
-def analyze_stability(df, factor_col, n_segments=3):
-    """将样本分为 N 段，分别计算 IC"""
-    dates = sorted(df["date"].unique())
-    segments = np.array_split(dates, n_segments)
+def analyze_results(report_csv):
+    """分析因子检验结果，识别显著因子和交易信号"""
+    report = pd.read_csv(report_csv)
     
-    results = []
-    for i, seg_dates in enumerate(segments):
-        seg = df[df["date"].isin(seg_dates)]
-        ic_list = []
-        for date in seg_dates:
-            s = seg[seg["date"] == date].dropna(subset=[factor_col, "forward_1d_ret"])
-            if len(s) >= 10:
-                ic, _ = stats.spearmanr(s[factor_col], s["forward_1d_ret"])
-                ic_list.append(ic)
-        results.append({
-            "segment": f"seg_{i+1}",
-            "n_dates": len(seg_dates),
-            "mean_ic": np.mean(ic_list) if ic_list else 0,
-            "ic_std": np.std(ic_list) if ic_list else 0,
-        })
-    return pd.DataFrame(results)
+    # 按FM t排序
+    report['significant'] = abs(report['FM_tstat']) > 1.96
+    
+    # 判断方向
+    for _, r in report.iterrows():
+        if abs(r['FM_tstat']) > 1.96:
+            if r['Mean_IC'] < 0:
+                direction = '负向因子(值越低越好)'
+            else:
+                direction = '正向因子(值越高越好)'
+        else:
+            direction = '不显著'
+    
+    return report
 ```
 
-### Step 4: 生成洞见
+## 文献交叉参考分析
 
-每项发现按以下结构组织：
+将 A 股检验结果与学术论文进行对比，验证因子是否"如论文所说"。
 
-1. **观察** — 数据展示什么（附数字）
-2. **解读** — 为什么可能如此
-3. **含义** — 对研究问题的意义
-4. **下一步** — 什么实验可以验证解读
+### 对比框架
 
-### Step 5: 输出分析报告
+| 因子 | 论文预测 | A股实测 | 偏差 | 含义 |
+|------|---------|--------|------|------|
+| turnover | IC 负（高换手=低收益） | IC=-0.051, FM t=-2.30 | 一致 ✅ | CH-4 换手率因子在 A 股显著 |
+| max_ret_1m | IC 负（彩票效应） | IC=-0.055, FM t=-1.53 | 方向一致，幅度不足 ⚠️ | A 股彩票效应存在但较弱 |
+| var_95 | IC ?（高VaR需补偿） | IC=0.032, FM t=0.50 | 方向正但统计不显著 | 尾部风险因子波动过大 |
+| momentum_12m | IC 正（US 动量） | A 股通常反转 | 方向不一致 | A 股反转效应 vs US 动量——市场结构差异 |
+
+### 偏差分析
+
+当 A 股结果与论文不一致时，排查方向：
+
+| 偏差类型 | 可能原因 | 行动 |
+|---------|---------|------|
+| 方向相反 | A 股市场微观结构不同（散户主导、T+1） | 检查因子逻辑是否跨市场适用 |
+| 方向一致但不显著 | 样本量不足 / 时间段差异 | 扩展样本期 / 增加股票数量 |
+| IC 不稳定(IR低) | 因子在某些市场状态下失效 | 分析因子状态依赖（牛/熊市分拆） |
+| 统计显著但经济意义小 | 交易成本吃掉收益 | 扣除 tcost 后重新计算多空收益 |
+
+### 论文对比清单
+
+分析每个显著因子时应回答：
+
+1. **这篇论文的原始发现是什么？**（方向、大小、统计量）
+2. **我们的 A 股数据复现了多少？**（方向是否一致，幅度差多少）
+3. **如果方向相反，是市场差异还是实现 bug？**（检查代码逻辑）
+4. **如果方向一致但更弱，是数据频率还是样本选择问题？**（日频 vs 月频）
+5. **这个因子和其他因子的相关性如何？**（新信息还是已知信息的代理）
+
+## 分析留痕
+
+每次分析的完整产出记录，支持人工追溯检阅。
+
+### 留痕文件清单
+
+| 文件 | 内容 | 供检阅者确认 |
+|------|------|------------|
+| `output/ashare_factor_report.csv` | 因子检验原始数据 | IC/IR/Sharpe/FM t 数值无误 |
+| `output/factor_report.md` | 结构化分析报告 | 结论与数据一致 |
+| `output/analysis_summary.json` | 分析摘要（JSON） | 质量评级合理 |
+| `output/因子分析报告.md` | 综合报告（含买入建议） | 建议可执行 |
+| `output/factor_analysis.xlsx` | Excel 报表（4个Sheet） | 数据完整 |
+| `output/logs/pipeline_YYYY-MM-DD.log` | 流水线运行日志 | 无异常终止 |
+
+### 分析步骤检视要点
+
+1. **IC/IR 检查** — 高 IC 应伴随合理的 IR，单高IC+低IR说明预测不稳定
+2. **FM t 显著性** — |t|>1.96 才可视为统计显著，>1.0 为弱显著
+3. **因子方向确认** — 显著因子的 IC 方向应与学术文献预期一致
+4. **多空收益检查** — 显著≠可交易，扣除 tcost 后多空收益是否为正
+5. **文献对比** — 结果是否与论文一致；如果不一致，是否有合理解释
+
+### 引用文献模板
+
+在分析报告中引用时使用统一格式：`[Author, Year, Journal]`。
+
+```
+# 分析报告中引用示例
+CH-4 换手率因子 (Liu, Stambaugh & Yuan, 2019, JFE) 在 A 股显著为负
+q-factor 投资因子 (Hou, Xue & Zhang, 2015, RFS) 由于财务数据缺失未能验证
+```
+
+## 输出示例
 
 ```markdown
-# 因子实验分析报告
+# 因子分析报告
 
-## 因子绩效排名（按 Sharpe）
-| 排名 | 因子 | IC | IR | Sharpe | FM t | 评级 |
-|------|------|----|----|--------|------|------|
-| 1 | beta | 0.019 | 0.45 | 1.71 | 1.60 | ★★★ |
-| 2 | momentum_12m | 0.012 | 0.32 | 1.22 | 1.45 | ★★☆ |
+## 因子绩效总表
+| 因子 | Mean_IC | IR | Sharpe | FM t | 多空年化 | 显著性 |
+|------|---------|----|--------|------|---------|--------|
+| st_reversal_1w | -0.019 | -0.09 | 1.06 | 2.01 | +25.1% | ✅ 显著 |
+| coskewness | ... | ... | ... | ... | ... | ... |
+| rsi_14 | ... | ... | ... | ... | ... | ... |
 
-## 分段稳定性
-| 因子 | 全样本 IC | 前 1/3 | 中 1/3 | 后 1/3 | 稳定性 |
-|------|----------|--------|--------|--------|--------|
-| beta | 0.019 | 0.021 | 0.018 | 0.017 | 稳定 |
+## 基于参考文献的因子类别分析
 
-## 挖掘方法对比
-| 方法 | 选中因子 | 重叠因子 | 独有因子 |
-|------|---------|---------|---------|
-| LASSO | 5 | 3 | 2 |
-| RF | 4 | 3 | 1 |
-| GP | 6 | 2 | 4 |
+| 类别 | 关注点 | 参考文献 |
+|------|--------|---------|
+| CH-3/CH-4 | EP+Size+Turnover 对A股的解释力 | Liu, Stambaugh & Yuan (2019, JFE) |
+| q-factor | IA投资+ROE盈利因子的显著性 | Hou, Xue & Zhang (2015, RFS) |
+| 高阶风险 | 协偏度/协峰度/VaR的预测力 | Harvey & Siddique (2000, JF) |
+| 技术指标 | RSI/布林带的短期反转信号 | Wilder (1978) |
+| ML共识因子 | 跨方法(贝叶斯/XGBoost/NN)共同选中的因子 | Kozak+ (2020); Gu+ (2020)
 
-## 建议
-- **推荐**: beta, momentum_12m — 稳定性好、IC 显著
-- **关注**: size — IC 方向不稳定，需进一步验证
-- **放弃**: ivol_capm — 负 IC 且无经济意义
+## 买入建议
+策略：1周反转选股
+- 每周选过去5日跌幅最大的前20%股票
+- 等权买入，持有1周后轮换
+- 预期年化：12-15%（纯多头）
 ```
