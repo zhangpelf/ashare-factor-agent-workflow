@@ -67,13 +67,14 @@
 | **G004 ARIS审阅** | `/auto-review-loop` | 跨模型对抗审阅（核心：执行者≠审阅者） |
 | | `/experiment-audit` | 实验完整性审计 |
 | | `/result-to-claim` | 结果→科学主张映射 |
-| **G005 检验报告** | `/paper-figure` | 生成出版物质量图表 |
-| | `/paper-write` | 论文/报告撰写 |
-| | `/paper-compile` | LaTeX 编译与质量检查 |
-| **G006 最终报告** | `/paper-write` | 综合报告撰写 |
-| | `/paper-compile` | 定稿编译 |
+| **G005 检验报告** | `/auto-因子图表` | 生成出版物质量图表（IC时序、累计收益、热力图） |
+| | `/auto-因子评估` | 基于 IC/IR/Sharpe/FM t-stat 评估因子有效性 |
+| | `/auto-因子报告` | 因子报告撰写 |
+| | `workflow_orchestrator --mode report` | HTML 渲染（含内联CSS、KPI卡片、响应式布局） |
+| | `workflow_orchestrator --mode figures` | 批量生成24张图表（含IC衰减图） |
+| **G006 最终报告** | `/auto-因子报告` | 综合报告撰写 |
+| | `workflow_orchestrator --mode report` | HTML 渲染 |
 | | `/kill-argument` | 200 字最强拒稿测试 |
-| | `/citation-audit` | 引用真实性审计 |
 
 ## 三、ARIS 跨模型对抗机制
 
@@ -144,13 +145,20 @@ graph TD
 /result-to-claim                     # 主张检验
 
 # === G005: 检验报告 ===
-/paper-figure "IC序列、分组收益图" 
-/paper-write "因子检验报告"
-/paper-compile
+# 1. 批量生成24张图表（IC时序、累计收益、相关性、IC衰减等）
+python3 -m src.workflow_orchestrator --mode figures --input output/ashare_factor_report.csv
+
+# 2. 评估因子有效性
+python3 -c "from workflow_orchestrator import analyze_results; import pandas as pd; summary = pd.read_csv('output/ashare_factor_report.csv'); print(analyze_results(summary))"
+
+# 3. 生成结构化报告 + HTML
+python3 -m src.workflow_orchestrator --mode report --input output/ashare_factor_report.csv
 
 # === G006: 最终报告 ===
-/paper-write "因子研究报告"
-/kill-argument
-/citation-audit
-/paper-compile
+# 1. 查看分析摘要
+python3 -m src.workflow_orchestrator --mode analyze --input output/ashare_factor_report.csv
+
+# 2. 结果归档到 output/
+cp output/factor_report.html output/factor_report_final.html
+cp output/factor_report.md output/factor_report_final.md
 ```
