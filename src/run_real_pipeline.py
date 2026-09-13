@@ -124,11 +124,62 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="启用组合优化回测：检验后的因子合成组合并回测 (默认关闭)")
     parser.add_argument("--top-n", type=int, default=10,
                         help="组合选股数量 (默认 10)")
-    parser.add_argument("--rebalance", choices=["daily", "weekly"], default="weekly",
-                        help="组合调仓频率 (默认 weekly)")
+    parser.add_argument("--rebalance", choices=["daily", "weekly", "biweekly", "monthly"],
+                        default="weekly",
+                        help="组合调仓频率 (默认 weekly；新增 biweekly/monthly)")
     parser.add_argument("--tcost-bps", type=float, default=10.0,
                         help="组合双边交易成本 (基点，默认 10 = 0.1%%)")
+    parser.add_argument("--methods", nargs="+", metavar="METHOD",
+                        default=['lasso', 'random_forest', 'genetic_programming'],
+                        help="因子挖掘方法列表 (默认 lasso random_forest genetic_programming)。"
+                             "修复：此前方法在代码里硬编码，工作流的 --method 传不进管线")
+    parser.add_argument("--max-weight", type=float, default=0.0,
+                        help="单股持仓上限 (如 0.05 = 5%%，默认 0 = 不限制)。"
+                             "超限部分按注水法再分配，全部触限时余量转现金")
+    parser.add_argument("--combine-method", choices=["additive", "multiplicative"],
+                        default="additive",
+                        help="因子合成方式：additive 加权求和 / "
+                             "multiplicative 分位数乘法（短板惩罚，压低靠单项拉分的标的）")
+    parser.add_argument("--neutralize", action="store_true",
+                        help="对因子做横截面市值中性化，并与原始结果并列输出 (默认关闭)")
+    parser.add_argument("--neutralize-industry", action="store_true",
+                        help="中性化时额外控制行业哑变量（需数据含 industry 列，缺列自动跳过）")
+    parser.add_argument("--factor-idea-hints", default=None,
+                        help='假设驱动因子：JSON 字符串或 JSON 文件路径，形如 '
+                             '\'[{"name":"rev_x_illiq","formula":"neg(amihud_illiq)*ts_return(close,5)"}]\'。'
+                             "接通「想法 → 计算管线」，产出 idea_ 前缀因子")
+    parser.add_argument("--min-amount-20d", type=float, default=None,
+                        help="流动性约束：调仓日剔除 20 日均成交额低于该值的股票 "
+                             "（单位与数据源 amount 一致；文章口径约 3000 万）")
+    parser.add_argument("--block-limit-up", action="store_true",
+                        help="交易约束：调仓日剔除当日涨停股（涨停不可买入）")
+    parser.add_argument("--vwap-exec", action="store_true",
+                        help="执行口径：改用次日 VWAP 收益（需 amount/volume 或 vwap 列）")
+    parser.add_argument("--increment-admission", action="store_true",
+                        help="组合增量准入：逐个检验因子对基准组合是否有增量，"
+                             "无增量者标记拒收（「样本改善 ≠ 组合增量」）")
     return parser.parse_args(argv)
+
+
+def _load_hints(spec: str) -> list:
+    """解析 --factor-idea-hints：支持 JSON 字符串或 JSON 文件路径。"""
+    import json
+
+    text = spec
+    p = Path(spec)
+    try:
+        if p.exists() and p.is_file():
+            text = p.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"  ⚠ hints 不是合法 JSON，已跳过: {e}")
+        return []
+    if isinstance(data, dict):
+        data = data.get("hints", [])
+    return data if isinstance(data, list) else []
 
 
 def _build_harness(args: argparse.Namespace, stock_ids: list[str], fields: list[str]):
@@ -237,7 +288,35 @@ def main(argv: list[str] | None = None):
     print("\n[2/6] 计算因子...")
     factor_df = compute_all_factors(df)
 
-    # 检测基本面因子是否成功计算（非原始列，而是 computed factors）
+    # 假设驱动因子：把「想法」真正接进计算管线（修此前 idea 只在 prompt 里空转的断链）
+    idea_cols: list[str] = []
+    if args.factor_idea_hints:
+        from factors import build_hint_factors
+        hints = _load_hints(args.factor_idea_hints)
+        if hints:
+            factor_df, idea_cols = build_hint_factors(factor_df, hints)
+            print(f"  假设驱动因子: {len(idea_cols)} 个 → {idea_cols}")
+        else:
+            print("  假设驱动因子: hints 解析为空，跳过")
+
+    # compute_all_factors 只返回「基准列 + 因子列」，而交易约束（涨停判定/成交额）、
+    # 行业中性化都需要原始行情列。这里按索引补回原始列——不重新取数、不引入未来信息。
+    raw_extra = [c for c in ("close", "open", "high", "low", "volume", "amount",
+                             "outstanding_share", "industry") if c in df.columns]
+    if raw_extra:
+        extra = df[raw_extra]
+        extra = extra[~extra.index.duplicated()]
+        factor_df = factor_df.join(extra, how="left")
+
+    # 时点纪律自检：财务因子若缺 ann_date 会静默带入前视偏差，这里显式暴露
+    try:
+        from akshare_data import assert_pit_alignment
+        pit = assert_pit_alignment(factor_df)
+        if not pit["pit_ok"]:
+            print(f"  ⚠ 时点纪律: {pit['message']}")
+    except Exception as e:  # noqa: BLE001 — 自检失败不影响主流程
+        logger.debug("时点自检跳过: %s", e)
+
     fin_factor_cols = ["roe", "roa", "gp_ratio", "op_margin", "cfo_ta", "accruals"]
     computed_fin_factors = [
         c for c in fin_factor_cols
@@ -248,10 +327,13 @@ def main(argv: list[str] | None = None):
     else:
         print(f"  基本面因子已计算: {len(computed_fin_factors)}/{len(fin_factor_cols)}")
 
+    # 原始行情列与辅助列不是因子，必须排除（否则会被当成因子去挖掘和检验）
+    non_factor = {'stock_id', 'date', 'return', 'forward_1d_ret',
+                  'ln_market_cap', 'vwap', 'limit_up', 'amount_20d_avg',
+                  'forward_1d_vwap_ret'} | set(raw_extra)
     price_cols = [
         c for c in factor_df.columns
-        if c not in ['stock_id', 'date', 'return', 'forward_1d_ret']
-        and factor_df[c].notna().sum() > 100
+        if c not in non_factor and factor_df[c].notna().sum() > 100
     ]
     print(f"  可计算因子: {len(price_cols)}")
 
@@ -273,7 +355,7 @@ def main(argv: list[str] | None = None):
     # --------------------------------------------------------
     from mine_factors import FactorMiningPipeline
 
-    print("\n[3/6] 因子挖掘 (LASSO + RandomForest + GeneticProgramming)...")
+    print(f"\n[3/6] 因子挖掘 ({' + '.join(args.methods)})...")
     last_date = factor_df['date'].max()
     cross = factor_df[factor_df['date'] == last_date].copy()
     cross = cross.dropna(subset=price_cols, thresh=max(3, len(price_cols) // 2))
@@ -282,7 +364,7 @@ def main(argv: list[str] | None = None):
         X = cross[price_cols].fillna(0)
         y = cross['forward_1d_ret'].fillna(0)
         pipeline = FactorMiningPipeline(
-            methods=['lasso', 'random_forest', 'genetic_programming']
+            methods=list(args.methods)
         )
         pipeline.run(X, y, gp_generations=15)
         tbl = pipeline.summary()
@@ -314,21 +396,59 @@ def main(argv: list[str] | None = None):
     tp = FactorTestPipeline(annual_factor=252)
     results = []
 
+    # 可选：横截面市值中性化。开启后每个因子都会额外产出一份 "_neutral" 结果，
+    # 与原始结果并列，用于直接看清「风格暴露贡献了多少」
+    neutralize_cols = None
+    if args.neutralize:
+        from factor_testing import add_ln_market_cap, add_industry_dummies
+        factor_df = add_ln_market_cap(factor_df)
+        if 'ln_market_cap' in factor_df.columns and factor_df['ln_market_cap'].notna().any():
+            neutralize_cols = ['ln_market_cap']
+            print("  横截面市值中性化：已启用 (控制变量 ln_market_cap)")
+        else:
+            print("  横截面市值中性化：跳过 (数据中无 market_cap 列)")
+
+        # 行业中性化：仅有行业列时才生效，缺列静默跳过（fail-open）
+        if args.neutralize_industry:
+            factor_df, ind_cols = add_industry_dummies(factor_df)
+            if ind_cols:
+                neutralize_cols = (neutralize_cols or []) + ind_cols
+                print(f"  行业中性化：已启用 ({len(ind_cols)} 个行业哑变量)")
+            else:
+                print("  行业中性化：跳过 (数据中无 industry 列，需先扩展数据源)")
+
+    def _record_and_print(f: str, zcol: str, tag: str = "", neutralize=None) -> None:
+        try:
+            r = tp.test_factor(factor_df, zcol, ret_col='forward_1d_ret', n_groups=5,
+                               neutralize_cols=neutralize)
+            results.append({
+                'factor': f + tag, 'mean_ic': r.mean_ic, 'ir': r.ir,
+                'ls_ann': r.long_short_annual_ret, 'sharpe': r.sharpe,
+                'fm_t': r.fama_macbeth_tstat, 'turnover': r.turnover,
+            })
+            print(f"  {f + tag:26s} IC={r.mean_ic:+.4f}  IR={r.ir:+.4f}  "
+                  f"LS={r.long_short_annual_ret:+.4f}  Sharpe={r.sharpe:+.4f}  "
+                  f"换手={r.turnover:.4f}")
+        except Exception as e:
+            print(f"  {f + tag:26s} SKIP ({e})")
+
     for f in test_factors:
         zcol = f + '_z'
         if zcol not in factor_df.columns:
             continue
-        try:
-            r = tp.test_factor(factor_df, zcol, ret_col='forward_1d_ret', n_groups=5)
-            results.append({
-                'factor': f, 'mean_ic': r.mean_ic, 'ir': r.ir,
-                'ls_ann': r.long_short_annual_ret, 'sharpe': r.sharpe,
-                'fm_t': r.fama_macbeth_tstat,
-            })
-            print(f"  {f:20s} IC={r.mean_ic:.4f}  IR={r.ir:.4f}  "
-                  f"LS={r.long_short_annual_ret:.4f}  Sharpe={r.sharpe:.4f}")
-        except Exception as e:
-            print(f"  {f:20s} SKIP ({e})")
+        _record_and_print(f, zcol)
+        if neutralize_cols:
+            _record_and_print(f, zcol, tag="(中性化)", neutralize=neutralize_cols)
+
+    # 假设驱动因子必须进检验清单——否则「想法接了管线但不检验」等于没接
+    for col in idea_cols:
+        if col not in factor_df.columns:
+            continue
+        zcol = col + '_z' if col + '_z' in factor_df.columns else col
+        print(f"  [假设驱动] ", end="")
+        _record_and_print(col, zcol)
+        if neutralize_cols:
+            _record_and_print(col, zcol, tag="(中性化)", neutralize=neutralize_cols)
 
     if harness is not None and args.validate_dsl and best_formula:
         _evaluate_dsl_candidate(harness, tp, factor_df, best_formula, price_cols)
@@ -339,18 +459,48 @@ def main(argv: list[str] | None = None):
     out_dir = Path(__file__).resolve().parent.parent / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    bt_df = factor_df  # 承载交易约束派生列的面板（供 4.5 / 4.6 共用）
+
     if args.portfolio:
         print("\n[4.5/6] 组合优化回测 (合成因子 → 选股 → 扣成本回测)...")
         try:
-            from portfolio import combine_factors, backtest_portfolio
+            from portfolio import (
+                combine_factors, backtest_portfolio,
+                add_limit_up_flag, add_tradability_metrics,
+            )
+
+            # 交易约束所需的派生字段（缺列自动降级，不影响主流程）
+            constraints_active = []
+            if args.block_limit_up:
+                bt_df = add_limit_up_flag(bt_df)
+                if 'limit_up' in bt_df.columns:
+                    constraints_active.append(f"涨停不可买({int(bt_df['limit_up'].sum())} 个样本日涨停)")
+            if args.min_amount_20d is not None or args.vwap_exec:
+                bt_df = add_tradability_metrics(bt_df)
+                if args.min_amount_20d is not None:
+                    if 'amount_20d_avg' in bt_df.columns and bt_df['amount_20d_avg'].notna().any():
+                        constraints_active.append(f"20日均成交额≥{args.min_amount_20d:,.0f}")
+                    else:
+                        print("  ⚠ 无 amount 列，流动性约束未生效")
+                if args.vwap_exec:
+                    if 'forward_1d_vwap_ret' in bt_df.columns and bt_df['forward_1d_vwap_ret'].notna().any():
+                        constraints_active.append("次日VWAP执行")
+                    else:
+                        print("  ⚠ 无 vwap/amount 列，VWAP 执行未生效，沿用收盘口径")
+            print(f"  生效约束: {' / '.join(constraints_active) if constraints_active else '无（仅手续费）'}")
 
             # 用通过检验的因子（非零 IC）合成综合得分
             valid_factors = [f for f in test_factors
                              if f + '_z' in factor_df.columns]
+            valid_factors += [c for c in idea_cols if c in factor_df.columns]
             if not valid_factors:
                 print("  无可用因子，跳过组合回测")
             else:
-                combo = combine_factors(factor_df, [f + '_z' for f in valid_factors])
+                combo = combine_factors(
+                    bt_df, [f + '_z' if f + '_z' in bt_df.columns else f
+                            for f in valid_factors],
+                    method=args.combine_method,
+                )
                 combo_result = backtest_portfolio(
                     combo,
                     factor_col="combined_score",
@@ -358,6 +508,10 @@ def main(argv: list[str] | None = None):
                     top_n=args.top_n,
                     rebalance=args.rebalance,
                     tcost_bps=args.tcost_bps,
+                    max_weight=args.max_weight if args.max_weight > 0 else None,
+                    min_amount_20d=args.min_amount_20d,
+                    block_limit_up=args.block_limit_up,
+                    vwap_exec=args.vwap_exec,
                 )
                 m = combo_result["metrics"]
                 nav = combo_result["nav"]
@@ -368,6 +522,11 @@ def main(argv: list[str] | None = None):
                 print(f"    年化收益: {m['annual_return']*100:.2f}%   "
                       f"Sharpe: {m['sharpe']:.2f}   "
                       f"最大回撤: {m['max_drawdown']*100:.2f}%")
+                print(f"    年化超额: {m.get('annual_excess', 0)*100:.2f}%   "
+                      f"年度正超额占比: {m.get('yearly_positive_ratio', 0)*100:.0f}% "
+                      f"({int(m.get('n_years', 0))} 个年度)   "
+                      f"换手率: {m.get('turnover', 0):.4f}")
+                print(f"    每次调仓平均被约束挡掉: {m.get('blocked_per_rebalance', 0):.1f} 只候选")
                 if nav.iloc[-1] > bench_nav.iloc[-1]:
                     print(f"  ✅ 组合跑赢基准 (+{(nav.iloc[-1]/bench_nav.iloc[-1]-1)*100:.1f}%)")
                 else:
@@ -378,6 +537,45 @@ def main(argv: list[str] | None = None):
                 print(f"  净值曲线 → {portfolio_out}")
         except Exception as e:  # noqa: BLE001 — fail-open
             print(f"  组合回测失败 (fail-open): {e}")
+
+    # --------------------------------------------------------
+    # Step 4.6: 组合增量准入（可选 --increment-admission）
+    # --------------------------------------------------------
+    if args.increment_admission and args.portfolio:
+        print("\n[4.6/6] 组合增量准入判定 (样本改善 ≠ 组合增量)...")
+        try:
+            from portfolio import marginal_increment
+
+            candidates = idea_cols + [f for f in test_factors if f + '_z' in factor_df.columns]
+            candidates = candidates[:8]
+            base_pool = [f for f in test_factors if f + '_z' in factor_df.columns][:5]
+            if not base_pool:                       # 无基准组合时用第一个假设因子兜底
+                base_pool = candidates[:1]
+            # 基准成员不做自己的增量判定（否则是自己跟自己比）
+            to_test = [c for c in candidates if c not in base_pool][:8]
+            admitted, rejected = [], []
+            for cand in to_test:
+                col = cand if cand in factor_df.columns else cand + '_z'
+                base = [c if c in factor_df.columns else c + '_z'
+                        for c in base_pool if c != cand]
+                r = marginal_increment(
+                    bt_df,
+                    base, col, ret_col="forward_1d_ret", top_n=args.top_n,
+                    rebalance=args.rebalance, tcost_bps=args.tcost_bps,
+                    max_weight=args.max_weight if args.max_weight > 0 else None,
+                    combine_method=args.combine_method,
+                )
+                flag = "✅ 准入" if r["admitted"] else "⛔ 拒收"
+                print(f"  {flag}  {cand:22s} {r['reason']}")
+                (admitted if r["admitted"] else rejected).append(cand)
+            print(f"  准入 {len(admitted)} / 拒收 {len(rejected)}")
+            admission_out = out_dir / "increment_admission.json"
+            import json
+            admission_out.write_text(json.dumps(
+                {"admitted": admitted, "rejected": rejected}, ensure_ascii=False, indent=2))
+            print(f"  准入结果 → {admission_out}")
+        except Exception as e:  # noqa: BLE001 — fail-open
+            print(f"  增量准入判定失败 (fail-open): {e}")
 
     # --------------------------------------------------------
     # Step 5: 因子相关性

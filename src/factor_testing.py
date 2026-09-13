@@ -32,6 +32,115 @@ class FactorTestResult:
 
 
 # ============================================================
+# 0. 横截面中性化
+# ============================================================
+
+def add_ln_market_cap(df: pd.DataFrame, cap_col: str = "market_cap",
+                      out_col: str = "ln_market_cap") -> pd.DataFrame:
+    """由市值列生成对数市值控制变量（供中性化使用）。
+
+    缺失市值先用当日截面中位数填补，避免整行被丢弃。
+    """
+    result = df.copy()
+    if cap_col not in result.columns:
+        return result
+    cap = pd.to_numeric(result[cap_col], errors="coerce")
+    cap = cap.where(cap > 0)
+    if "date" in result.columns:
+        cap = cap.fillna(cap.groupby(result["date"]).transform("median"))
+    cap = cap.fillna(cap.median())
+    result[out_col] = np.log(cap.where(cap > 0, np.nan))
+    return result
+
+
+def add_industry_dummies(
+    df: pd.DataFrame,
+    industry_col: str = "industry",
+    prefix: str = "ind_",
+    drop_first: bool = True,
+    min_obs: int = 5,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """由行业列生成哑变量控制变量（供行业中性化使用）。
+
+    返回 (新 df, 哑变量列名列表)。行业列缺失或取值过于稀疏时返回 (原 df, [])，
+    调用方据此跳过行业中性化——与项目既有的 fail-open 风格一致。
+
+    为什么需要：只控市值不够。文章与公开实证都显示，剥离行业暴露后
+    一部分因子的显著性会直接消失（收益来自行业轮动而非选股能力）。
+    """
+    result = df.copy()
+    if industry_col not in result.columns:
+        logger.warning("add_industry_dummies: 缺列 %s，跳过行业中性化", industry_col)
+        return result, []
+
+    ind = result[industry_col].astype("object")
+    counts = ind.value_counts()
+    # 样本过少的行业并入 __other__，避免哑变量在截面上退化为单点
+    rare = counts[counts < min_obs].index
+    if len(rare) > 0:
+        ind = ind.where(~ind.isin(rare), "__other__")
+
+    dummies = pd.get_dummies(ind, prefix=prefix, drop_first=drop_first, dtype=float)
+    dummy_cols = list(dummies.columns)
+    for c in dummy_cols:
+        result[c] = dummies[c]
+    return result, dummy_cols
+
+
+def neutralize_factor(
+    df: pd.DataFrame,
+    factor_col: str,
+    control_cols: Optional[List[str]] = None,
+    date_col: str = "date",
+    out_col: Optional[str] = None,
+    min_obs: int = 10,
+) -> pd.DataFrame:
+    """横截面中性化：每个交易日做带截距的 OLS，用**残差**作为净因子。
+
+    用法：
+        df = add_ln_market_cap(df)
+        df = neutralize_factor(df, "size_z", ["ln_market_cap"])
+        # → 新增列 "size_z_neutral"，已剥离市值暴露
+
+    行业中性化：先 pd.get_dummies 得到行业哑变量列，把列名放进 control_cols。
+
+    为什么必须做：未经中性化的 IC / Sharpe 里往往混着风格暴露。
+    公开实证中目标价因子未中性化时多空年化 7.4% / Sharpe 0.58，
+    剥离行业与流通市值后 Sharpe 掉到 0.002、IC 转负——原收益几乎全部来自暴露。
+    """
+    out_col = out_col or f"{factor_col}_neutral"
+    result = df.copy()
+    controls = [c for c in (control_cols or []) if c in result.columns]
+
+    if not controls:
+        logger.warning("neutralize_factor: 无可用控制变量，原样返回")
+        result[out_col] = result[factor_col]
+        return result
+
+    residual = pd.Series(np.nan, index=result.index, dtype=float)
+
+    for _, idx in result.groupby(date_col).groups.items():
+        sub = result.loc[idx]
+        y = pd.to_numeric(sub[factor_col], errors="coerce")
+        X = sub[controls].apply(pd.to_numeric, errors="coerce")
+        mask = y.notna().values & np.isfinite(X.values).all(axis=1)
+        if int(mask.sum()) < max(min_obs, len(controls) + 3):
+            continue
+        Xm = np.column_stack([np.ones(int(mask.sum())), X.values[mask]])
+        try:
+            beta, *_ = np.linalg.lstsq(Xm, y.values[mask], rcond=None)
+        except np.linalg.LinAlgError:
+            continue
+        fitted = Xm @ beta
+        tmp = pd.Series(np.nan, index=sub.index, dtype=float)
+        tmp.iloc[np.where(mask)[0]] = y.values[mask] - fitted
+        residual.loc[idx] = tmp
+
+    result[out_col] = residual
+    return result
+
+
+# ============================================================
 # 1. IC/IR 分析
 # ============================================================
 
@@ -442,8 +551,17 @@ class FactorTestPipeline:
         date_col: str = "date",
         control_cols: Optional[List[str]] = None,
         n_groups: int = 10,
+        neutralize_cols: Optional[List[str]] = None,
     ) -> FactorTestResult:
-        """对单一因子运行完整检验"""
+        """对单一因子运行完整检验
+
+        neutralize_cols: 给定控制变量（如 ["ln_market_cap"]）时，先做横截面
+        中性化，用残差作为待检验因子，结果以 "<factor>_neutral" 记录。
+        """
+        if neutralize_cols:
+            df = neutralize_factor(df, factor_col, neutralize_cols, date_col=date_col)
+            factor_col = f"{factor_col}_neutral"
+
         result = FactorTestResult(factor_name=factor_col)
 
         # 1. IC 分析
@@ -492,6 +610,16 @@ class FactorTestPipeline:
         except (ValueError, np.linalg.LinAlgError) as e:
             logger.debug(f"Fama-MacBeth failed for {factor_col}: {e}")
 
+        # 4. 换手率
+        # 修复：此前 TurnoverAnalyzer 从未被调用，result.turnover 恒为默认 0.0，
+        # 而这个 0 会被 research_memory 写进 SQLite，成为脏数据。
+        try:
+            ta = TurnoverAnalyzer()
+            t_res = ta.compute(df, factor_col, date_col, n_groups)
+            result.turnover = float(t_res.get("mean_turnover", 0.0) or 0.0)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Turnover analysis failed for {factor_col}: {e}")
+
         self.results[factor_col] = result
         return result
 
@@ -502,10 +630,14 @@ class FactorTestPipeline:
         ret_col: str = "forward_1d_ret",
         date_col: str = "date",
         n_groups: int = 10,
+        neutralize_cols: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """批量测试多个因子"""
+        """批量测试多个因子；给定 neutralize_cols 时同时输出中性化版本"""
         for fc in factor_cols:
             self.test_factor(df, fc, ret_col, date_col, n_groups=n_groups)
+            if neutralize_cols:
+                self.test_factor(df, fc, ret_col, date_col, n_groups=n_groups,
+                                 neutralize_cols=neutralize_cols)
 
         return self.summary_df()
 
@@ -524,6 +656,7 @@ class FactorTestPipeline:
                 "空头年化": r.bottom_group_annual_ret,
                 "Sharpe": r.sharpe,
                 "FM_tstat": r.fama_macbeth_tstat,
+                "换手率": r.turnover,
             })
 
         return pd.DataFrame(rows).sort_values("IR", ascending=False)

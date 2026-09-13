@@ -46,9 +46,21 @@ class ResearchMemoryEngine:
                 required_fields TEXT NOT NULL,
                 status TEXT NOT NULL,  -- PENDING, PASSED, REJECTED, ERROR
                 fail_reason TEXT,
+                fail_code TEXT,           -- LOGIC/NOISE/CONSTRAINT/REDUNDANT/TIMING
+                reproduce_condition TEXT, -- 满足什么条件时值得重开
                 created_at TEXT NOT NULL
             );
             """)
+
+            # 兼容已存在的旧库：补列；列已存在时 ALTER 会抛 OperationalError，忽略
+            for _ddl in (
+                "ALTER TABLE candidates ADD COLUMN fail_code TEXT",
+                "ALTER TABLE candidates ADD COLUMN reproduce_condition TEXT",
+            ):
+                try:
+                    cursor.execute(_ddl)
+                except sqlite3.OperationalError:
+                    pass
 
             # Evaluation metrics table
             cursor.execute("""
@@ -92,17 +104,22 @@ class ResearchMemoryEngine:
 
     def record_candidate(self, ast_hash: str, expression: str, canonical_expression: str,
                          lookback: int, fields: List[str], status: str = "PENDING",
-                         fail_reason: Optional[str] = None):
+                         fail_reason: Optional[str] = None,
+                         fail_code: Optional[str] = None,
+                         reproduce_condition: Optional[str] = None):
         """Records a new candidate factor into Research Memory."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
             INSERT OR REPLACE INTO candidates 
-            (ast_hash, expression, canonical_expression, lookback_window, required_fields, status, fail_reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (ast_hash, expression, canonical_expression, lookback_window, required_fields,
+             status, fail_reason, fail_code, reproduce_condition, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 ast_hash, expression, canonical_expression, lookback,
-                json.dumps(fields), status, fail_reason, datetime.now().isoformat()
+                json.dumps(fields), status, fail_reason,
+                (fail_code or "").upper() or None, reproduce_condition,
+                datetime.now().isoformat()
             ))
             conn.commit()
 
@@ -140,6 +157,62 @@ class ResearchMemoryEngine:
             VALUES (?, ?, ?, ?)
             """, (h1, h2, correlation, datetime.now().isoformat()))
             conn.commit()
+
+    FAIL_CODES = {
+        "LOGIC": "逻辑错，机制本身站不住（永久关闭）",
+        "NOISE": "样本内偶然，换区间就没了",
+        "CONSTRAINT": "有真 alpha，但加交易约束后消失（正面发现，条件变化值得重开）",
+        "REDUNDANT": "与已有因子高度冗余，无增量",
+        "TIMING": "时点对齐 / 前视偏差导致，修正后失效",
+    }
+
+    def record_failure(self, ast_hash: str, expression: str, fail_code: str,
+                       fail_reason: str = "", reproduce_condition: str = "",
+                       canonical_expression: str = "", lookback: int = 0,
+                       fields=None) -> None:
+        """结构化记录一个被关闭的方向。
+
+        fail_code 必须是 FAIL_CODES 之一。注意 CONSTRAINT 与 LOGIC 是两类完全不同
+        的失败：前者说明方向有真 alpha、只是不可交易，值得单独统计而不是一起丢掉。
+        """
+        code = (fail_code or "").upper()
+        if code not in self.FAIL_CODES:
+            code = "LOGIC"
+        self.record_candidate(
+            ast_hash, expression, canonical_expression or expression, lookback,
+            list(fields or []), status="REJECTED", fail_reason=fail_reason,
+            fail_code=code, reproduce_condition=reproduce_condition,
+        )
+
+    def query_failures(self, fail_code: Optional[str] = None,
+                       keyword: Optional[str] = None) -> List[Dict[str, Any]]:
+        """查询已关闭方向。
+
+        用途：新一轮开跑**之前**先查一次，命中「已关闭」且条件未变的直接跳过。
+        归档如果只写不读，就只是一条日志，不构成资产。
+        """
+        sql = "SELECT * FROM candidates WHERE status IN ('REJECTED', 'ERROR')"
+        params: List[Any] = []
+        if fail_code:
+            sql += " AND fail_code = ?"
+            params.append(fail_code.upper())
+        if keyword:
+            sql += " AND (expression LIKE ? OR fail_reason LIKE ?)"
+            params.extend([f"%{keyword}%", f"%{keyword}%"])
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            return [dict(r) for r in cursor.fetchall()]
+
+    def failure_stats(self) -> Dict[str, int]:
+        """按失败原因分类统计。CONSTRAINT 一栏值得单独看——那是不可交易的真 alpha。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COALESCE(fail_code, 'UNCLASSIFIED') AS c, COUNT(*) "
+                "FROM candidates WHERE status IN ('REJECTED','ERROR') GROUP BY c"
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
 
     def get_candidate(self, ast_hash: str) -> Optional[Dict[str, Any]]:
         """Retrieves candidate record by AST hash."""

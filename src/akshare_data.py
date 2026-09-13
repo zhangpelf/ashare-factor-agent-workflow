@@ -134,6 +134,99 @@ def _em_prefix(symbol: str) -> str:
 
 
 # ============================================================
+# Point-in-Time 时点纪律（文章「时点对齐」要求的落地）
+# ============================================================
+
+FINANCIAL_COLS = [
+    "book_equity", "net_income", "sales", "gross_profit", "total_assets",
+    "total_liabilities", "operating_income", "cfo", "current_assets",
+    "current_liabilities", "depreciation", "cash", "short_term_debt",
+    "retained_earnings",
+]
+
+
+def assert_pit_alignment(
+    df: pd.DataFrame,
+    fin_cols: Optional[List[str]] = None,
+    ann_date_col: str = "ann_date",
+) -> Dict[str, object]:
+    """检查财务因子是否按披露日对齐（前视偏差自检）。
+
+    现状：`_extract_latest_financials` 是「取最新一份报表」，不区分披露日，
+    因此当前数据下财务因子存在前视偏差风险。本函数把风险显式暴露出来，
+    而不是让它静默存在：
+
+    返回 {"pit_ok": bool, "fin_cols": [...], "message": str}
+    - pit_ok=True  财务列存在且带 ann_date 列（已按披露日对齐）
+    - pit_ok=False 财务列存在但无 ann_date（存在前视偏差风险，需在报告中声明）
+    """
+    cols = fin_cols or FINANCIAL_COLS
+    present = [c for c in cols if c in df.columns and df[c].notna().any()]
+    if not present:
+        return {"pit_ok": True, "fin_cols": [], "message": "无财务因子，无需时点对齐"}
+    if ann_date_col in df.columns and df[ann_date_col].notna().any():
+        return {"pit_ok": True, "fin_cols": present,
+                "message": f"{len(present)} 个财务因子已带 {ann_date_col}，时点对齐正常"}
+    return {
+        "pit_ok": False,
+        "fin_cols": present,
+        "message": (f"{len(present)} 个财务因子缺少 {ann_date_col} 列 → "
+                    "存在前视偏差风险，结论中须声明（当前实现为「取最新报表」）"),
+    }
+
+
+def align_financials_pit(
+    panel: pd.DataFrame,
+    fin_history: pd.DataFrame,
+    fin_cols: Optional[List[str]] = None,
+    ann_date_col: str = "ann_date",
+    report_date_col: str = "report_date",
+    date_col: str = "date",
+    stock_col: str = "stock_id",
+) -> pd.DataFrame:
+    """按**披露日**把财务数据对齐到行情面板（真正的 Point-in-Time）。
+
+    对每个 (股票, 交易日)，只取 `ann_date <= 交易日` 的报告中 report_date 最新的一份。
+    这是消除前视偏差的标准做法：4 月 30 日年报才披露，4 月 1 日就不能用这份年报。
+
+    参数：
+        panel        行情面板（含 stock_id / date）
+        fin_history  财务历史（含 stock_id / ann_date / report_date / 各财务列）
+    返回：panel + 财务列（未匹配到则为 NaN）。缺列时原样返回并告警。
+    """
+    cols = [c for c in (fin_cols or FINANCIAL_COLS) if c in fin_history.columns]
+    required = {stock_col, ann_date_col, report_date_col}
+    if not required <= set(fin_history.columns) or not cols:
+        logger.warning("align_financials_pit: 财务历史缺列 %s，跳过对齐",
+                       sorted(required - set(fin_history.columns)))
+        return panel
+
+    out = panel.copy()
+    for c in cols:
+        out[c] = np.nan
+
+    fin = fin_history.copy()
+    fin[ann_date_col] = pd.to_datetime(fin[ann_date_col], errors="coerce")
+    fin[report_date_col] = pd.to_datetime(fin[report_date_col], errors="coerce")
+    fin = fin.dropna(subset=[ann_date_col, report_date_col]).sort_values(
+        [stock_col, report_date_col])
+
+    for stock, grp in out.groupby(stock_col):
+        hist = fin[fin[stock_col] == stock]
+        if hist.empty:
+            continue
+        for idx, row in grp.iterrows():
+            d = pd.to_datetime(row[date_col])
+            usable = hist[hist[ann_date_col] <= d]
+            if usable.empty:
+                continue
+            latest = usable.iloc[-1]
+            for c in cols:
+                out.at[idx, c] = latest[c]
+    return out
+
+
+# ============================================================
 # 数据源
 # ============================================================
 
@@ -439,6 +532,16 @@ class AShareData:
             df["market_cap"] = df["close"] * df["outstanding_share"]
         else:
             df["market_cap"] = np.nan
+
+        # 成交额：新浪日线通常已带 amount 列；缺失时用「收盘价 × 成交量」近似兜底。
+        # 注意这是**代理值**（收盘价而非均价），仅用于流动性下限过滤这类粗粒度用途，
+        # 不能当作真实 VWAP 使用——真实 VWAP 优先用 amount/volume 反推。
+        if "amount" not in df.columns and {"close", "volume"} <= set(df.columns):
+            df["amount"] = df["close"] * df["volume"]
+            logger.warning(
+                "数据源未提供 amount 列，已用 close×volume 近似；"
+                "流动性过滤可用，但 VWAP 执行口径属于近似"
+            )
 
         df = df.dropna(subset=["return"]).reset_index(drop=True)
 

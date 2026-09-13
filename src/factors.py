@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +438,130 @@ FACTOR_REGISTRY = {
 def _has_required_columns(df: pd.DataFrame, columns: list) -> bool:
     """检查 DataFrame 是否包含所有必需列"""
     return all(c in df.columns for c in columns)
+
+
+# ============================================================
+# 假设驱动因子构造（文章「Agent 自主进化」的假设入口）
+# ============================================================
+# 安全表达式白名单：只允许字面量、列名、四则运算、幂、少数一元函数。
+# 不用 df.eval / eval —— 那等于把 LLM 输出的字符串当代码执行。
+_ALLOWED_UNARY = {"abs", "log", "log_abs", "sqrt_abs", "neg", "sign", "square"}
+
+
+def _safe_eval_expr(expr: str, df: pd.DataFrame) -> pd.Series:
+    """在受限 AST 上求值假设表达式；不合法则抛 ValueError。
+
+    支持：+ - * / ** 与一元负号；abs/log/log_abs/sqrt_abs/neg/sign/square；
+    变量名必须是 df 中已存在的列。
+    """
+    import ast as _ast
+
+    def _div(a, b):
+        b = b.replace(0, np.nan) if isinstance(b, pd.Series) else (np.nan if b == 0 else b)
+        return a / b
+
+    def _ev(node):
+        if isinstance(node, _ast.Expression):
+            return _ev(node.body)
+        if isinstance(node, _ast.Constant):
+            if isinstance(node.value, (int, float)):
+                return float(node.value)
+            raise ValueError(f"不支持的常量: {node.value!r}")
+        if isinstance(node, _ast.Name):
+            if node.id not in df.columns:
+                raise ValueError(f"未注册的列名: {node.id}")
+            return pd.to_numeric(df[node.id], errors="coerce")
+        if isinstance(node, _ast.UnaryOp):
+            if isinstance(node.op, _ast.USub):
+                return -_ev(node.operand)
+            if isinstance(node.op, _ast.UAdd):
+                return _ev(node.operand)
+            raise ValueError("只支持一元正负号")
+        if isinstance(node, _ast.BinOp):
+            left, right = _ev(node.left), _ev(node.right)
+            if isinstance(node.op, _ast.Add):
+                return left + right
+            if isinstance(node.op, _ast.Sub):
+                return left - right
+            if isinstance(node.op, _ast.Mult):
+                return left * right
+            if isinstance(node.op, _ast.Div):
+                return _div(left, right)
+            if isinstance(node.op, _ast.Pow):
+                return left ** right
+            raise ValueError("只支持 + - * / **")
+        if isinstance(node, _ast.Call):
+            if not isinstance(node.func, _ast.Name) or node.func.id not in _ALLOWED_UNARY:
+                raise ValueError(f"不支持的函数: {getattr(node.func, 'id', node.func)}")
+            if len(node.args) != 1:
+                raise ValueError("一元函数只接受 1 个参数")
+            x = _ev(node.args[0])
+            fn = node.func.id
+            if fn == "abs":
+                return x.abs()
+            if fn == "neg":
+                return -x
+            if fn == "sign":
+                return np.sign(x)
+            if fn == "square":
+                return x ** 2
+            if fn == "log":
+                return np.log(x.where(x > 0))
+            if fn == "log_abs":
+                return np.log(x.abs().where(x.abs() > 0))
+            return np.sqrt(x.abs())  # sqrt_abs
+        raise ValueError(f"不支持的语法节点: {type(node).__name__}")
+
+    return _ev(_ast.parse(expr, mode="eval"))
+
+
+def build_hint_factors(
+    df: pd.DataFrame,
+    hints: list,
+    out_prefix: str = "idea_",
+    date_col: str = "date",
+) -> Tuple[pd.DataFrame, list]:
+    """按「假设（hint）」构造因子，打通「想法 → 计算管线」的断链。
+
+    hints 形如：
+        [{"name": "reversal_x_illiq",
+          "formula": "neg(ts_return(close, 5)) * amihud_illiq",
+          "story": "短期反转叠加高流动性冲击，反转更易兑现"}]
+
+    对每条 hint：按受限 AST 求值公式 → 横截面 z-score 标准化 →
+    以 `idea_<name>` 命名写入。返回 (新 df, 新增列名列表)。
+    单条失败只告警跳过，不影响其它 hint 与主流程。
+
+    这些列的命名带 `idea_` 前缀，检验/报告里可据此把「假设驱动因子」
+    与既有因子库区分开，直接对照文献预期方向。
+    """
+    result = df.copy()
+    added: list = []
+    for i, h in enumerate(hints or []):
+        if not isinstance(h, dict):
+            logger.warning("hint #%d 不是字典，跳过", i)
+            continue
+        name = str(h.get("name") or f"hint{i}")
+        formula = h.get("formula")
+        if not formula:
+            logger.warning("hint %s 缺 formula，跳过", name)
+            continue
+        col = f"{out_prefix}{name}"
+        try:
+            raw = _safe_eval_expr(str(formula), result)
+            if date_col in result.columns:
+                raw = raw.groupby(result[date_col]).transform(
+                    lambda x: (x - x.mean()) / (x.std() + 1e-10)
+                )
+            result[col] = raw
+            if result[col].notna().sum() == 0:
+                logger.warning("hint %s 全为空，跳过（公式可能引用了缺失列）", name)
+                continue
+            added.append(col)
+            logger.info("hint %s → %s 已构造 (%s)", name, col, formula)
+        except Exception as e:  # noqa: BLE001 — 单条失败不影响主流程
+            logger.warning("hint %s 构造失败 (%s): %s", name, formula, e)
+    return result, added
 
 
 def compute_all_factors(df: pd.DataFrame, raise_on_error: bool = False) -> pd.DataFrame:

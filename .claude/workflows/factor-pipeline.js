@@ -17,6 +17,7 @@ export const meta = {
   description: 'A股因子挖掘全流水线：文献调研→因子计算→检验→ARIS对抗审阅→图表→报告',
   phases: [
     { title: 'G001: 文献调研', detail: '搜索因子相关学术文献' },
+    { title: 'G001.5: 假设自提', detail: 'LLM 读失败档案自动产出假设因子' },
     { title: 'G002: 因子挖掘', detail: '计算因子 + 多方法挖掘' },
     { title: 'G003: 因子检验', detail: 'IC/IR/Sharpe/FM-t 检验' },
     { title: 'G004: ARIS审阅', detail: '跨模型对抗审阅 + 驳回回溯' },
@@ -31,7 +32,8 @@ const PYTHON = (typeof process !== 'undefined' && process.env.FACTOR_PYTHON) || 
 const OUTPUT = BASE + '/output'
 const FIGURES = BASE + '/figures'
 const FACTOR_IDEA = args?.factor_idea || '动量反转因子'
-const METHODS = args?.methods || ['LASSO', 'XGBoost', 'LightGBM']
+const METHODS = (args?.methods || ['lasso', 'random_forest', 'genetic_programming'])
+  .map(m => String(m).toLowerCase())  // 修复：管线按小写匹配，传大写会被静默跳过
 const STOCKS = args?.stocks || 60
 const SOURCE = args?.source || 'akshare'
 const MAX_ROUNDS = args?.max_rounds || 3
@@ -39,6 +41,41 @@ const MODE = args?.mode || 'standard'  // 'standard' | 'nightly'
 
 // TODAY from args (passed by slash command handler) or fallback
 const TODAY = args?.today || 'unknown-date'
+
+// ── v3 新增：交易约束 / 假设驱动 / 增量准入的透传参数 ──────────────
+// 说明：此前工作流调管线时一个 flag 都不传，管线里的能力全是默认关闭状态。
+// 这里把可选能力集中成一段命令后缀，挖掘与改进两处 bash 共用，避免再次跑偏。
+//
+// v4：PIPE_FLAGS 从「一次性常量」改为 pipelineFlags() 函数 —— 因为假设因子
+// 是运行中动态生成的（G001.5），且换方法后会带着最新失败档案重新生成。
+let hypothesisHints = Array.isArray(args?.idea_hints) ? args.idea_hints : null
+let hypothesisSource = hypothesisHints ? '外部指定 (args.idea_hints)' : '未生成'
+
+function pipelineFlags() {
+  const f = []
+  if (args?.neutralize) f.push('--neutralize')
+  if (args?.neutralize_industry) f.push('--neutralize-industry')
+  if (args?.block_limit_up) f.push('--block-limit-up')
+  if (args?.vwap_exec) f.push('--vwap-exec')
+  if (args?.increment_admission) f.push('--increment-admission')
+  if (args?.min_amount_20d) f.push(`--min-amount-20d ${args.min_amount_20d}`)
+  if (args?.max_weight) f.push(`--max-weight ${args.max_weight}`)
+  if (args?.combine_method) f.push(`--combine-method ${args.combine_method}`)
+  // 只要有任一组合层选项就打开 --portfolio，否则约束无处生效
+  if (args?.portfolio || f.length > 0) f.push('--portfolio')
+  if (args?.top_n) f.push(`--top-n ${args.top_n}`)
+  if (args?.rebalance) f.push(`--rebalance ${args.rebalance}`)
+  if (hypothesisHints && hypothesisHints.length) {
+    // 单引号会破坏 shell 包裹，直接剥掉（公式/故事里不该有单引号）
+    const json = JSON.stringify(hypothesisHints).replace(/'/g, '')
+    f.push(`--factor-idea-hints '${json}'`)
+  }
+  return f.join(' ')
+}
+
+// 失败码受控分类（与 research_memory.FAIL_CODES 保持一致）
+// CONSTRAINT 特别重要：有真 alpha 但不可交易，是「发现」而不是「死路」
+const FAIL_CODES = ['LOGIC', 'NOISE', 'CONSTRAINT', 'REDUNDANT', 'TIMING']
 
 // ── 运行记录 ───────────────────────────────────────────────────
 let currentMethod = METHODS[0]
@@ -154,9 +191,114 @@ let allResults = []
 
 while (methodIndex < METHODS.length) {
   currentMethod = METHODS[methodIndex]
+
+  // ── G001.5: 假设自提（闭环的最后一环）──────────────────────────
+  // 每轮换方法前重新生成：上一轮的失败已归档，新一轮的假设由档案喂出来。
+  // 外部指定 args.idea_hints 时跳过（人工优先）；args.disable_auto_hypotheses 可关闭。
+  if (!hypothesisHints && !args?.disable_auto_hypotheses) {
+    phase('G001.5: 假设自提')
+    log('读取失败档案与因子清单，让 LLM 产出假设因子...')
+
+    const context = await agent(`
+## 任务：收集假设生成所需的上下文（只跑命令，不做分析）
+
+### 1. 可用因子列清单（假设公式只能引用这些名字）
+\`\`\`bash
+cd "${BASE}"
+${PYTHON} -c "import sys; sys.path.insert(0, '${BASE}/src'); from factors import FACTOR_REGISTRY; import json; print(json.dumps(sorted(FACTOR_REGISTRY.keys())))"
+\`\`\`
+
+### 2. 失败档案：全局统计 + 最近 8 条已关闭方向
+\`\`\`bash
+cd "${BASE}"
+${PYTHON} ${BASE}/src/memory_cli.py stats --json
+${PYTHON} ${BASE}/src/memory_cli.py failures --limit 8 --json
+\`\`\`
+
+把三段命令的原始输出分别填入对应字段；失败时填空值。
+`, {
+      label: '假设上下文',
+      phase: 'G001.5: 假设自提',
+      schema: {
+        type: 'object',
+        properties: {
+          factor_columns: { type: 'array', items: { type: 'string' } },
+          fail_stats: { type: 'object' },
+          failures: { type: 'array', items: { type: 'object' } },
+        },
+        required: ['factor_columns', 'failures'],
+      },
+    })
+
+    const columns = (context.factor_columns || []).join(', ')
+    const failBlock = (context.failures || []).map(f =>
+      `- [${f.fail_code || '?'}] ${f.expression || ''}｜${f.fail_reason || ''}` +
+      (f.reproduce_condition ? `｜复现条件: ${f.reproduce_condition}` : '')
+    ).join('\n') || '- （档案为空，首轮探索）'
+
+    const hyp = await agent(`
+## 任务：生成假设因子（2~4 条）
+
+因子思路: "${FACTOR_IDEA}"
+文献预期 IC 方向: ${litResult.expected_ic_direction}
+文献公式参考: ${litResult.formula || '无'}
+文献变种: ${(litResult.variants || []).join('、') || '无'}
+
+### 可用列名（公式只能引用这些，逐字一致）
+${columns}
+
+### 表达式语法（受限沙箱，超出即报错被丢弃）
+- 运算符: + - * / **
+- 一元函数: abs(x) log(x) log_abs(x) sqrt_abs(x) neg(x) sign(x) square(x)
+- 变量必须是上面的列名；不允许其它函数、不允许属性访问
+
+### 失败档案（这些方向已经死过，别原样再来）
+${failBlock}
+
+### 要求
+1. 生成 2~4 条假设，围绕因子思路与文献变种，优先提出**文献公式之外**的组合
+2. 每条含：name（小写下划线）、formula、story（一句话经济机制）、expected_direction（正/负）
+3. 若某假设与失败档案中某条的复现条件实质相同，必须换机制或换变量
+4. 公式里不要出现单引号
+`, {
+      label: '假设生成',
+      phase: 'G001.5: 假设自提',
+      schema: {
+        type: 'object',
+        properties: {
+          hypotheses: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                formula: { type: 'string' },
+                story: { type: 'string' },
+                expected_direction: { type: 'string', enum: ['正', '负'] },
+              },
+              required: ['name', 'formula', 'story'],
+            },
+          },
+          rationale: { type: 'string', description: '为什么选这些假设' },
+        },
+        required: ['hypotheses'],
+      },
+    })
+
+    if (hyp.hypotheses && hyp.hypotheses.length) {
+      hypothesisHints = hyp.hypotheses
+      hypothesisSource = `自动生成 (${hyp.hypotheses.length} 条，基于失败档案 ${Object.keys(context.fail_stats || {}).length} 类)`
+      log(`假设生成: ${hyp.hypotheses.map(h => h.name).join(', ')}`)
+    } else {
+      hypothesisHints = []
+      hypothesisSource = '自动生成失败（LLM 未产出有效假设），本轮不注入假设因子'
+      log('假设生成: 未产出有效假设，继续用因子库默认路径')
+    }
+  }
+
   phase(`G002: 因子挖掘 [${currentMethod}]`)
 
-  log(`方法[${methodIndex+1}/${METHODS.length}]: ${currentMethod} 开始挖掘`)
+  log(`方法[${methodIndex+1}/${METHODS.length}]: ${currentMethod} 开始挖掘${hypothesisHints && hypothesisHints.length ? `（含假设因子 ${hypothesisHints.length} 条，来源: ${hypothesisSource}）` : ''}`)
 
   // 运行 Python 挖掘管线
   const miningResult = await agent(`
@@ -166,7 +308,7 @@ while (methodIndex < METHODS.length) {
 2. 运行因子计算+挖掘:
    \`\`\`bash
    cd "${BASE}"
-   ${PYTHON} ${BASE}/src/run_real_pipeline.py --source ${SOURCE} --stocks ${STOCKS}
+   ${PYTHON} ${BASE}/src/run_real_pipeline.py --source ${SOURCE} --stocks ${STOCKS} --methods ${METHODS.join(' ')} ${pipelineFlags()}
    \`\`\`
 3. 检查输出是否生成
 4. 如果运行失败，给出修复建议并重试最多 1 次
@@ -282,12 +424,18 @@ while (methodIndex < METHODS.length) {
         properties: {
           verdict: { type: 'string', enum: ['pass', 'reject'] },
           confidence: { type: 'string', enum: ['高', '中', '低'] },
+          // v3：受控失败分类——决定检索哪一类历史档案，也是负向归档的键
+          primary_fail_code: {
+            type: 'string',
+            enum: ['LOGIC', 'NOISE', 'CONSTRAINT', 'REDUNDANT', 'TIMING'],
+            description: 'LOGIC=逻辑/前视偏差 NOISE=纯噪声 CONSTRAINT=有alpha但被约束杀掉 REDUNDANT=与既有因子冗余 TIMING=时点/调仓节奏问题',
+          },
           reviewer_comments: { type: 'string' },
           improvement_suggestions: { type: 'array', items: { type: 'string' } },
           data_integrity_issues: { type: 'array', items: { type: 'string' } },
           statistical_concerns: { type: 'array', items: { type: 'string' } },
         },
-        required: ['verdict', 'reviewer_comments', 'improvement_suggestions'],
+        required: ['verdict', 'reviewer_comments', 'improvement_suggestions', 'primary_fail_code'],
       },
     })
 
@@ -303,6 +451,73 @@ while (methodIndex < METHODS.length) {
     log(`ARIS 驳回: ${arisVerdict.reviewer_comments?.slice(0, 100)}...`)
 
     if (arisRound < MAX_ROUNDS) {
+      const failCode = FAIL_CODES.includes(arisVerdict.primary_fail_code)
+        ? arisVerdict.primary_fail_code : 'LOGIC'
+
+      // ── 归档 + 检索：把「重试」升级为「搜索」的关键一步 ──
+      // 先写本次失败（受控分类 + 复现条件），再读回同类历史失败，
+      // 随后整段注入改进 prompt。归档如果只写不读，就只是一条日志。
+      const reproduce = [
+        `methods=${METHODS.join(',')}`,
+        `stocks=${STOCKS}`,
+        `flags=${PIPE_FLAGS || 'none'}`,
+        `round=${arisRound}`,
+      ].join(' ')
+
+      const archive = await agent(`
+## 任务：失败归档写入 + 历史档案检索（只做这两件事，不要改代码）
+
+### 第一步：归档本次失败方向
+\`\`\`bash
+cd "${BASE}"
+${PYTHON} ${BASE}/src/memory_cli.py record-failure \\
+  --hash "aris-${currentMethod}-r${arisRound}" \\
+  --expr "${(testResult.best_factor || 'unknown').replace(/"/g, '')}" \\
+  --code ${failCode} \\
+  --reason "${(arisVerdict.reviewer_comments || '').replace(/"/g, '').slice(0, 200)}" \\
+  --condition "${reproduce}" --json
+\`\`\`
+
+### 第二步：检索同类历史失败（同 fail_code，最多 10 条）与全局统计
+\`\`\`bash
+cd "${BASE}"
+${PYTHON} ${BASE}/src/memory_cli.py failures --code ${failCode} --limit 10 --json
+${PYTHON} ${BASE}/src/memory_cli.py stats --json
+\`\`\`
+
+把两条命令的**原始输出**填入对应字段；命令失败时填空数组。
+`, {
+        label: `档案:${failCode}`,
+        phase: 'G004: ARIS审阅',
+        schema: {
+          type: 'object',
+          properties: {
+            recorded: { type: 'boolean', description: '第一步是否成功写入' },
+            failures: { type: 'array', items: { type: 'object' }, description: '同类历史失败记录' },
+            stats: { type: 'object', description: '各 fail_code 的计数' },
+            raw_output: { type: 'string', description: '命令原始输出，便于排查' },
+          },
+          required: ['recorded', 'failures'],
+        },
+      })
+
+      log(`档案检索: 同类历史失败 ${archive.failures?.length || 0} 条`)
+
+      const archiveBlock = `
+## 历史失败档案（勿重复）
+失败码: ${failCode}（LOGIC=逻辑错 NOISE=噪声 CONSTRAINT=有alpha但被约束杀掉 REDUNDANT=与既有因子冗余 TIMING=时点问题）
+同类历史失败 ${archive.failures?.length || 0} 条：
+${(archive.failures || []).map(f =>
+  `- [${f.fail_code || '?'}] ${f.expression || ''}｜原因: ${f.fail_reason || ''}` +
+  (f.reproduce_condition ? `｜复现条件: ${f.reproduce_condition}` : '')
+).join('\n') || '- （暂无记录）'}
+
+累计统计: ${JSON.stringify(archive.stats || {})}
+
+**硬约束**：若你的修复方案与上面某条记录的「复现条件」相同，必须换方向或
+明确说明这次为什么会有不同结果。重复提交已被关闭的方向视为无效改进。
+`
+
       log(`根据审阅意见改进...`)
 
       await agent(`
@@ -313,11 +528,11 @@ ${arisVerdict.reviewer_comments}
 
 改进建议:
 ${arisVerdict.improvement_suggestions?.join('\n') || '无'}
-
+${archiveBlock}
 请根据这些意见修复因子挖掘代码，重新运行:
 \`\`\`bash
 cd "${BASE}"
-${PYTHON} ${BASE}/src/run_real_pipeline.py --source ${SOURCE} --stocks ${STOCKS}
+${PYTHON} ${BASE}/src/run_real_pipeline.py --source ${SOURCE} --stocks ${STOCKS} --methods ${METHODS.join(' ')} ${pipelineFlags()}
 \`\`\`
 
 修复要点:
@@ -344,6 +559,9 @@ ${PYTHON} ${BASE}/src/run_real_pipeline.py --source ${SOURCE} --stocks ${STOCKS}
   if (arisPassed) break
 
   log(`ARIS 达最大轮次仍未通过，换方法`)
+  // 闭环关键：清空本轮假设。下一个方法会用「包含本轮失败」的最新档案重新生成假设，
+  // 而不是带着已被否定的假设继续撞墙。
+  hypothesisHints = null
   methodIndex++
 }
 
@@ -494,6 +712,8 @@ return {
   factor: FACTOR_IDEA,
   method: currentMethod,
   all_methods_tried: METHODS,
+  hypothesis_source: hypothesisSource,
+  hypothesis_count: hypothesisHints ? hypothesisHints.length : 0,
   literature: litResult,
   best_factor: finalSummary?.best_factor,
   best_sharpe: finalSummary?.best_sharpe,
